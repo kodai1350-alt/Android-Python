@@ -175,6 +175,13 @@ val zipStdlib by tasks.registering(Zip::class) {
     archiveFileName.set("stdlib.zip")
 }
 
+// Stub wheels for packages that cannot be built on the phone (see PythonRuntime.BUNDLED_WHEELS).
+val buildStubWheels by tasks.registering(Zip::class) {
+    from(layout.projectDirectory.dir("src/main/python/stubs/audioop_lts"))
+    destinationDirectory.set(pythonDir.map { it.dir("wheels") })
+    archiveFileName.set("audioop_lts-0.2.2-py3-none-any.whl")
+}
+
 fun generateTask(
     variant: ApplicationVariant, directories: SourceDirectories,
     configure: GenerateTask.() -> Unit,
@@ -208,6 +215,7 @@ androidComponents.onVariants { variant ->
                 include("pip-*.whl")
                 rename { "pip.whl" }
             }
+            into("wheels") { from(buildStubWheels) }
         }
         dependsOn(extractPython)
     }

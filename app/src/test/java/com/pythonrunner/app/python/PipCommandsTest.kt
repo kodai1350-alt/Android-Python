@@ -19,6 +19,7 @@ class PipCommandsTest {
         assertEquals(
             rt.command(
                 "-m", "pip", "install", "--upgrade", "--no-input", "--disable-pip-version-check",
+                "--find-links", rt.wheelsDir.path, "--only-binary", "audioop-lts",
                 "--target", File("/b/libs").path, "discord.py",
             ),
             PipCommands.install(rt, listOf("discord.py"), File("/b/libs")),

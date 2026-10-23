@@ -35,6 +35,7 @@ class PythonRuntimeTest {
         "python/stdlib.zip" to stdlibZip("lib/python3.14/os.py", "lib/python3.14/json/__init__.py"),
         "python/cacert.pem" to "CERT".toByteArray(),
         "python/pip.whl" to "WHEEL".toByteArray(),
+        "python/wheels/audioop_lts-0.2.2-py3-none-any.whl" to "STUB".toByteArray(),
     )
 
     private fun openAsset(name: String): InputStream =
@@ -53,6 +54,7 @@ class PythonRuntimeTest {
         assertEquals("3.14.9-1", File(rt.home, ".installed").readText())
         assertEquals("CERT", File(rt.home, "cacert.pem").readText())
         assertEquals("WHEEL", rt.pipWheel.readText())
+        assertEquals("STUB", File(rt.wheelsDir, "audioop_lts-0.2.2-py3-none-any.whl").readText())
         assertTrue(rt.isInstalled())
     }
 

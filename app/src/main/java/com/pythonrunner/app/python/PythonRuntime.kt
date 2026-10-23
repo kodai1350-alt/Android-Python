@@ -19,6 +19,8 @@ class PythonRuntime(
     val home: File = File(baseDir, "python")
     val executable: File = File(nativeLibDir, "libpylauncher.so")
     val pipWheel: File = File(home, "pip.whl")
+    /** Local wheels pip may use via --find-links (stubs for packages that cannot be built on Android). */
+    val wheelsDir: File = File(home, "wheels")
 
     private val marker = File(home, ".installed")
 
@@ -34,6 +36,10 @@ class PythonRuntime(
         openAsset("python/stdlib.zip").use { unzip(it, staging) }
         openAsset("python/cacert.pem").use { input -> File(staging, "cacert.pem").outputStream().use { input.copyTo(it) } }
         openAsset("python/pip.whl").use { input -> File(staging, pipWheel.name).outputStream().use { input.copyTo(it) } }
+        val stagingWheels = File(staging, wheelsDir.name).apply { mkdirs() }
+        for (name in BUNDLED_WHEELS) {
+            openAsset("python/wheels/$name").use { input -> File(stagingWheels, name).outputStream().use { input.copyTo(it) } }
+        }
         File(staging, marker.name).writeText(version)
         home.deleteRecursively()
         if (!staging.renameTo(home)) throw IOException("Could not move $staging to $home")
@@ -72,7 +78,13 @@ class PythonRuntime(
         }
     }
 
-    private companion object {
+    internal companion object {
+        /**
+         * discord.py requires audioop-lts on Python 3.13+, which has no Android wheel. Its only use is
+         * voice, which is out of scope, so a stub stands in for it.
+         */
+        val BUNDLED_WHEELS = listOf("audioop_lts-0.2.2-py3-none-any.whl")
+
         // discord.py's dependencies fall back to pure Python when these are set.
         val NO_EXTENSIONS = listOf("AIOHTTP", "YARL", "MULTIDICT", "FROZENLIST", "PROPCACHE")
     }
