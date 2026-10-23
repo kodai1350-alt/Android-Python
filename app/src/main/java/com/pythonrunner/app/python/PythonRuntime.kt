@@ -18,7 +18,6 @@ class PythonRuntime(
 ) {
     val home: File = File(baseDir, "python")
     val executable: File = File(nativeLibDir, "libpylauncher.so")
-    val pipWheel: File = File(home, "pip.whl")
     /** Local wheels pip may use via --find-links (stubs for packages that cannot be built on Android). */
     val wheelsDir: File = File(home, "wheels")
 
@@ -39,7 +38,6 @@ class PythonRuntime(
         staging.mkdirs()
         openAsset("python/stdlib.zip").use { unzip(it, staging) }
         openAsset("python/cacert.pem").use { input -> File(staging, "cacert.pem").outputStream().use { input.copyTo(it) } }
-        openAsset("python/pip.whl").use { input -> File(staging, pipWheel.name).outputStream().use { input.copyTo(it) } }
         val stagingWheels = File(staging, wheelsDir.name).apply { mkdirs() }
         for (name in BUNDLED_WHEELS) {
             openAsset("python/wheels/$name").use { input -> File(stagingWheels, name).outputStream().use { input.copyTo(it) } }

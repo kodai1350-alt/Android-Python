@@ -212,10 +212,6 @@ androidComponents.onVariants { variant ->
         into("python") {
             from(zipStdlib)
             from(downloadCacert)
-            from(pythonPrefix.map { it.dir("lib/python$pyMinorVersion/ensurepip/_bundled") }) {
-                include("pip-*.whl")
-                rename { "pip.whl" }
-            }
             into("wheels") { from(buildStubWheels) }
         }
         dependsOn(extractPython)

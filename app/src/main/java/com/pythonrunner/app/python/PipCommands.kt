@@ -3,9 +3,8 @@ package com.pythonrunner.app.python
 import java.io.File
 
 object PipCommands {
-    /** Installs pip itself into the runtime's site-packages by running it straight from the wheel. */
-    fun bootstrap(rt: PythonRuntime): List<String> =
-        rt.command("${rt.pipWheel.path}/pip", "install", "--no-index", "--no-deps", rt.pipWheel.path)
+    /** Installs pip into the runtime's site-packages from the wheel bundled with the stdlib. */
+    fun bootstrap(rt: PythonRuntime): List<String> = rt.command("-m", "ensurepip", "--upgrade")
 
     fun install(rt: PythonRuntime, packages: List<String>, target: File): List<String> =
         rt.command(
