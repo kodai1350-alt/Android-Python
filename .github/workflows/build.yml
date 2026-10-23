@@ -20,6 +20,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6  # v6.4.0
       - name: Unit tests and debug APK
         run: ./gradlew testDebugUnitTest assembleDebug --console=plain
+      - name: Linux-only tests must have run
+        run: |
+          python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+          path = "app/build/test-results/testDebugUnitTest/TEST-com.pythonrunner.app.process.ManagedProcessTest.xml"
+          cases = [c for c in ET.parse(path).getroot().iter("testcase") if c.get("name") == "forceKillsAfterGrace"]
+          assert cases, "forceKillsAfterGrace not found"
+          assert cases[0].find("skipped") is None, "forceKillsAfterGrace was skipped"
+          assert cases[0].find("failure") is None, "forceKillsAfterGrace failed"
+          print("forceKillsAfterGrace passed")
+          EOF
       - uses: actions/upload-artifact@v4
         if: always()
         with:
