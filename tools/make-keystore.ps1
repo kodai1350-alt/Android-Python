@@ -12,7 +12,18 @@ if (Test-Path $keystore) {
     exit 1
 }
 
-$keytool = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\keytool.exe' } else { 'keytool' }
+$javaHome = if ($env:JAVA_HOME) { $env:JAVA_HOME } else { [Environment]::GetEnvironmentVariable('JAVA_HOME', 'User') }
+$candidates = @()
+if ($javaHome) { $candidates += Join-Path $javaHome 'bin\keytool.exe' }
+$candidates += Get-ChildItem 'C:\Program Files\Microsoft', 'C:\Program Files\Java', 'C:\Program Files\Eclipse Adoptium' `
+    -Directory -Filter 'jdk*' -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName 'bin\keytool.exe' }
+$keytool = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $keytool) {
+    $onPath = Get-Command keytool -ErrorAction SilentlyContinue
+    if ($onPath) { $keytool = $onPath.Source } else { throw 'keytool が見つかりません。JDK 17 をインストールしてください。' }
+}
+Write-Host "keytool: $keytool"
 
 $secure = Read-Host '署名鍵のパスワードを決めて入力してください（6文字以上）' -AsSecureString
 $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
