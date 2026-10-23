@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Environment
 import android.content.Intent
 import android.net.Uri
@@ -94,7 +95,6 @@ fun SpikeScreen() {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { hasStorage = BotController.hasSharedStorageAccess(context) }
     val store = remember(hasStorage) { BotController.store(context) }
     val uiPrefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
-    var secretsHelpOpen by remember { mutableStateOf(!uiPrefs.getBoolean("secretsHelpClosed", false)) }
 
     val status by BotController.status.collectAsStateWithLifecycle()
     val startedAt by BotController.startedAtMillis.collectAsStateWithLifecycle()
@@ -217,19 +217,21 @@ fun SpikeScreen() {
                     Modifier.fillMaxWidth().background(Color(0xFFFFF4E6), RoundedCornerShape(8.dp)).padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text("📱 Botのファイルを、スマホのファイルアプリやPCからも見えるようにしませんか？", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    Text(
-                        "ストレージへのアクセスを許可すると、Botのファイルのコピーをスマホの Documents/PythonRunner/MyBot に置きます。" +
-                            "ファイルアプリやPCで見たり編集したりできます。",
-                        fontSize = 12.sp, color = Color.DarkGray,
-                    )
-                    Text(
-                        "🔒 実行するのはアプリ専用の場所（他のアプリから書き換えられない）のファイルです。" +
-                            "共有のコピーで変更があったときは、起動前に一覧を見せて、取り込むか確認します。" +
-                            ".env などの秘密のファイルはコピーしません。",
-                        fontSize = 12.sp, color = Color.DarkGray,
-                    )
-                    Text(SHARED_WARNING, fontSize = 12.sp, color = Color(0xFFC92A2A))
+                    Text("Botのファイルを、スマホのファイルアプリやPCからも見えるようにしませんか？", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Help("storage", uiPrefs) {
+                        Text(
+                            "ストレージへのアクセスを許可すると、Botのファイルのコピーをスマホの Documents/PythonRunner/MyBot に置きます。" +
+                                "ファイルアプリやPCで見たり編集したりできます。",
+                            fontSize = 12.sp, color = Color.DarkGray,
+                        )
+                        Text(
+                            "実行するのはアプリ専用の場所（他のアプリから書き換えられない）のファイルです。" +
+                                "共有のコピーで変更があったときは、起動前に一覧を見せて、取り込むか確認します。" +
+                                ".env などの秘密のファイルはコピーしません。",
+                            fontSize = 12.sp, color = Color.DarkGray,
+                        )
+                        Text(SHARED_WARNING, fontSize = 12.sp, color = Color(0xFFC92A2A))
+                    }
                     Button(onClick = { requestStorage() }) { Text("ストレージへのアクセスを許可する") }
                 }
             }
@@ -267,7 +269,9 @@ fun SpikeScreen() {
                 }
                 OutlinedButton(onClick = { exportShared() }) { Text("🔄 更新") }
             }
-            if (hasStorage) Text(SHARED_WARNING, fontSize = 11.sp, color = Color(0xFFC92A2A))
+            if (hasStorage) {
+                Help("sharedWarning", uiPrefs) { Text(SHARED_WARNING, fontSize = 12.sp, color = Color(0xFFC92A2A)) }
+            }
         }
 
         Section("3. ライブラリ（pip install）") {
@@ -307,25 +311,14 @@ fun SpikeScreen() {
         }
 
         Section("4. 秘密の値（トークンなど）※使わなくてもOK") {
-            if (secretsHelpOpen) {
-                Column(Modifier.fillMaxWidth().background(Color(0xFFF1F3F5), RoundedCornerShape(8.dp)).padding(8.dp)) {
-                    Text(
-                        "トークンをBotのコードに直接書かずに済ませるための保管場所です。" +
-                            "ここに入れた値は、Botの中で os.environ[\"名前\"] で読めます。" +
-                            "コードにトークンを直接書いているなら、ここは空のままで大丈夫です。",
-                        fontSize = 13.sp,
-                        color = Color.DarkGray,
-                    )
-                    TextButton(onClick = {
-                        secretsHelpOpen = false
-                        uiPrefs.edit().putBoolean("secretsHelpClosed", true).apply()
-                    }) { Text("✕ 説明を閉じる") }
-                }
-            } else {
-                TextButton(onClick = {
-                    secretsHelpOpen = true
-                    uiPrefs.edit().putBoolean("secretsHelpClosed", false).apply()
-                }) { Text("ℹ 説明") }
+            Help("secrets", uiPrefs) {
+                Text(
+                    "トークンをBotのコードに直接書かずに済ませるための保管場所です。" +
+                        "ここに入れた値は、Botの中で os.environ[\"名前\"] で読めます。" +
+                        "コードにトークンを直接書いているなら、ここは空のままで大丈夫です。",
+                    fontSize = 13.sp,
+                    color = Color.DarkGray,
+                )
             }
             secrets.forEachIndexed { index, row ->
                 Column(Modifier.fillMaxWidth()) {
@@ -443,11 +436,37 @@ fun SpikeScreen() {
                     )
                 }) { Text("電池の最適化を除外する") }
             }
-            Text(
-                "ASUSの「自動起動マネージャー」（モバイルマネージャー内）で Python Runner を許可してください。",
-                fontSize = 13.sp,
-            )
+            Help("deviceSettings", uiPrefs) {
+                Text(
+                    "ASUSの「自動起動マネージャー」（モバイルマネージャー内）で Python Runner を許可してください。",
+                    fontSize = 13.sp,
+                )
+            }
         }
+    }
+}
+
+/**
+ * An explanation the user can close; it stays closed (remembered per [key]) until "説明を見る" is pressed.
+ */
+@Composable
+private fun Help(key: String, prefs: SharedPreferences, content: @Composable () -> Unit) {
+    val prefKey = "help.$key.closed"
+    var open by remember { mutableStateOf(!prefs.getBoolean(prefKey, false)) }
+    fun setOpen(value: Boolean) {
+        open = value
+        prefs.edit().putBoolean(prefKey, !value).apply()
+    }
+    if (open) {
+        Column(
+            Modifier.fillMaxWidth().background(Color(0xFFF1F3F5), RoundedCornerShape(8.dp)).padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            content()
+            TextButton(onClick = { setOpen(false) }) { Text("✕ 説明を閉じる") }
+        }
+    } else {
+        TextButton(onClick = { setOpen(true) }) { Text("ℹ 説明を見る") }
     }
 }
 
