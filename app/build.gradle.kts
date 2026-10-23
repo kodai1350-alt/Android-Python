@@ -19,8 +19,9 @@ android {
         applicationId = "com.pythonrunner.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Release CI derives these from the tag and run number; the Python marker depends on versionCode.
+        versionCode = System.getenv("VERSION_CODE")?.toInt() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "0.1.0-dev"
         ndk { abiFilters += "arm64-v8a" }
         buildConfigField("String", "PYTHON_VERSION", "\"${property("pythonVersion")}\"")
     }
@@ -127,24 +128,24 @@ abstract class GenerateTask : Sync() {
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
 }
 
-val downloadPython by tasks.registering(DownloadFile::class) {
+val downloadPython = tasks.register<DownloadFile>("downloadPython") {
     url.set("https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-aarch64-linux-android.tar.gz")
     sha256.set(pythonSha256)
     dest.set(pythonDir.map { it.file("python-$pythonVersion-aarch64-linux-android.tar.gz") })
 }
 
-val downloadCacert by tasks.registering(DownloadFile::class) {
+val downloadCacert = tasks.register<DownloadFile>("downloadCacert") {
     url.set("https://curl.se/ca/cacert.pem")
     dest.set(pythonDir.map { it.file("cacert.pem") })
 }
 
-val extractPython by tasks.registering(Sync::class) {
+val extractPython = tasks.register<Sync>("extractPython") {
     from(downloadPython.map { tarTree(it.dest.get().asFile) })
     include("prefix/**")
     into(pythonDir.map { it.dir("extracted") })
 }
 
-val buildPyLauncher by tasks.registering(BuildLauncher::class) {
+val buildPyLauncher = tasks.register<BuildLauncher>("buildPyLauncher") {
     dependsOn(extractPython)
     source.set(layout.projectDirectory.file("src/main/c/pylauncher.c"))
     prefix.set(pythonPrefix)
@@ -162,7 +163,7 @@ val buildPyLauncher by tasks.registering(BuildLauncher::class) {
     output.set(pythonDir.map { it.file("launcher/libpylauncher.so") })
 }
 
-val zipStdlib by tasks.registering(Zip::class) {
+val zipStdlib = tasks.register<Zip>("zipStdlib") {
     dependsOn(extractPython)
     from(pythonPrefix.map { it.dir("lib/python$pyMinorVersion") }) {
         into("lib/python$pyMinorVersion")
@@ -176,7 +177,7 @@ val zipStdlib by tasks.registering(Zip::class) {
 }
 
 // Stub wheels for packages that cannot be built on the phone (see PythonRuntime.BUNDLED_WHEELS).
-val buildStubWheels by tasks.registering(Zip::class) {
+val buildStubWheels = tasks.register<Zip>("buildStubWheels") {
     from(layout.projectDirectory.dir("src/main/python/stubs/audioop_lts"))
     destinationDirectory.set(pythonDir.map { it.dir("wheels") })
     archiveFileName.set("audioop_lts-0.2.2-py3-none-any.whl")

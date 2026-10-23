@@ -87,7 +87,8 @@ object BotController {
                 store.botDir.mkdirs()
                 ManagedProcess(
                     rt.command(*args.toTypedArray()),
-                    rt.environment(listOf(store.libsDir), store.envVars),
+                    // No user secrets here: pip may run arbitrary build backends from PyPI.
+                    rt.environment(listOf(store.libsDir), emptyMap()),
                     store.botDir, onLine, onExit,
                 ).start()
             } catch (e: Exception) {

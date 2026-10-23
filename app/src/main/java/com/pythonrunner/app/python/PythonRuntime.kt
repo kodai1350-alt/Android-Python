@@ -26,6 +26,10 @@ class PythonRuntime(
 
     fun isInstalled(): Boolean = marker.isFile && marker.readText() == version
 
+    /** True once pip has been bootstrapped into the current extraction (re-extraction removes it). */
+    fun isPipInstalled(): Boolean =
+        isInstalled() && File(home, "lib").listFiles()?.any { File(it, "site-packages/pip").isDirectory } == true
+
     /** Extracts into a temporary directory and writes the marker last, so an interrupted run is redone. */
     @Synchronized
     fun ensureInstalled() {

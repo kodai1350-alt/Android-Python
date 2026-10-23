@@ -61,7 +61,7 @@ class PythonRuntimeTest {
     @Test fun reExtractsWhenMarkerMissing() {
         val rt = runtime()
         val broken = File(rt.home, "lib/python3.14/broken.py")
-        broken.parentFile.mkdirs()
+        broken.parentFile!!.mkdirs()
         broken.writeText("half-written")
         assertFalse(rt.isInstalled())
         rt.ensureInstalled()
@@ -80,6 +80,16 @@ class PythonRuntimeTest {
         File(rt.home, ".installed").writeText("3.14.8-1")
         rt.ensureInstalled()
         assertEquals("3.14.9-1", File(rt.home, ".installed").readText())
+    }
+
+    @Test fun pipIsReadyOnlyForCurrentInstall() {
+        val rt = runtime()
+        rt.ensureInstalled()
+        assertFalse(rt.isPipInstalled())
+        File(rt.home, "lib/python3.14/site-packages/pip").mkdirs()
+        assertTrue(rt.isPipInstalled())
+        // After an app update the old home (with pip) is still there until re-extraction.
+        assertFalse(runtime(version = "3.14.9-2").isPipInstalled())
     }
 
     @Test fun environmentHasRequiredVariables() {

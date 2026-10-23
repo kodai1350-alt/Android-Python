@@ -60,7 +60,6 @@ import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.service.BotController
-import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -85,7 +84,7 @@ fun SpikeScreen() {
 
     val workLog = remember { mutableStateListOf<LogLine>() }
     var busy by remember { mutableStateOf(false) }
-    var ready by remember { mutableStateOf(isPipInstalled(rt.home)) }
+    var ready by remember { mutableStateOf(rt.isPipInstalled()) }
     var mainFile by remember { mutableStateOf(store.mainFile) }
     var packages by remember { mutableStateOf("discord.py") }
     val secrets = remember {
@@ -320,9 +319,6 @@ private fun formatUptime(millis: Long): String {
     val s = total % 60
     return if (h > 0) "${h}時間${m}分" else "${m}分${s}秒"
 }
-
-private fun isPipInstalled(home: File): Boolean =
-    home.resolve("lib").listFiles()?.any { File(it, "site-packages/pip").isDirectory } == true
 
 private fun displayName(context: Context, uri: Uri): String? =
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
