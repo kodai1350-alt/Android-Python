@@ -11,7 +11,7 @@ import com.pythonrunner.app.BuildConfig
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.KeyValue
 import com.pythonrunner.app.bot.SpikeBotStore
-import com.pythonrunner.app.files.FolderMigration
+import com.pythonrunner.app.files.FolderSync
 import com.pythonrunner.app.process.LogBuffer
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.process.ManagedProcess
@@ -62,27 +62,23 @@ object BotController {
         }.also { runtime = it }
     }
 
+    /** The bot always runs from app-private storage, which other apps cannot modify. */
     fun store(context: Context): SpikeBotStore {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences("spike", Context.MODE_PRIVATE)
-        val internal = File(app.filesDir, "bots/spike")
-        val botDir = if (hasSharedStorageAccess(app)) {
-            sharedBotDir().also { shared ->
-                // Copy once only: afterwards the shared folder is the user's, even if they empty it.
-                if (!prefs.getBoolean(KEY_MIGRATED, false)) {
-                    FolderMigration.copyIfTargetEmpty(internal, shared)
-                    prefs.edit().putBoolean(KEY_MIGRATED, true).apply()
-                }
-            }
-        } else {
-            internal
-        }
         return SpikeBotStore(app.filesDir, object : KeyValue {
             override fun get(key: String): String? = prefs.getString(key, null)
             override fun put(key: String, value: String?) {
                 prefs.edit().putString(key, value).apply()
             }
-        }, botDir)
+        })
+    }
+
+    /** The shared copy for the Files app and a PC; null without storage access. */
+    fun sync(context: Context): FolderSync? {
+        val app = context.applicationContext
+        if (!hasSharedStorageAccess(app)) return null
+        return FolderSync(store(app).botDir, sharedBotDir(), File(app.filesDir, "bots/spike-shared.manifest"))
     }
 
     /** Documents/PythonRunner/<bot>, visible to the Files app and a PC over USB. */
@@ -100,7 +96,6 @@ object BotController {
         }
 
     private const val BOT_FOLDER_NAME = "MyBot"
-    private const val KEY_MIGRATED = "spike.migratedToShared"
 
     fun start(context: Context) {
         val intent = Intent(context, BotService::class.java).setAction(BotService.ACTION_START)

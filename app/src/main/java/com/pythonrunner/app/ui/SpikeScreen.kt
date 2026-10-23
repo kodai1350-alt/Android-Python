@@ -31,6 +31,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -64,6 +65,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.duplicateNames
+import com.pythonrunner.app.files.SyncChanges
 import java.io.File
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
@@ -71,6 +73,8 @@ import com.pythonrunner.app.python.PipInput
 import com.pythonrunner.app.service.BotController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val Green = Color(0xFF2F9E44)
 private val Red = Color(0xFFE03131)
@@ -121,13 +125,24 @@ fun SpikeScreen() {
         )
     }
 
+    // Mirror the private bot folder to the shared copy (never overwrites edits made there).
+    fun exportShared() {
+        scope.launch {
+            withContext(Dispatchers.IO) { runCatching { BotController.sync(context)?.export() } }
+            filesVersion++
+        }
+    }
+    LaunchedEffect(hasStorage) { if (hasStorage) exportShared() }
+
+    var pendingImport by remember { mutableStateOf<SyncChanges?>(null) }
+
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
                 val name = displayName(context, uri) ?: "main.py"
                 context.contentResolver.openInputStream(uri)!!.use { store.importPy(name, it) }
                 mainFile = store.mainFile
-                filesVersion++
+                exportShared()
             } catch (e: Exception) {
                 workLog += LogLine(System.currentTimeMillis(), "ファイルを取り込めませんでした: ${e.message}", true)
             }
@@ -149,6 +164,13 @@ fun SpikeScreen() {
 
     val askNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         BotController.start(context)
+    }
+    fun launchBot() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            BotController.start(context)
+        }
     }
 
     Column(
@@ -197,8 +219,14 @@ fun SpikeScreen() {
                 ) {
                     Text("📱 Botのファイルを、スマホのファイルアプリやPCからも見えるようにしませんか？", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Text(
-                        "今はアプリ専用の場所（他のアプリから見えない）に置いています。ストレージへのアクセスを許可すると、" +
-                            "スマホの Documents/PythonRunner/MyBot に移します（今のファイルはそのままコピーされます）。",
+                        "ストレージへのアクセスを許可すると、Botのファイルのコピーをスマホの Documents/PythonRunner/MyBot に置きます。" +
+                            "ファイルアプリやPCで見たり編集したりできます。",
+                        fontSize = 12.sp, color = Color.DarkGray,
+                    )
+                    Text(
+                        "🔒 実行するのはアプリ専用の場所（他のアプリから書き換えられない）のファイルです。" +
+                            "共有のコピーで変更があったときは、起動前に一覧を見せて、取り込むか確認します。" +
+                            ".env などの秘密のファイルはコピーしません。",
                         fontSize = 12.sp, color = Color.DarkGray,
                     )
                     Button(onClick = { requestStorage() }) { Text("ストレージへのアクセスを許可する") }
@@ -208,10 +236,10 @@ fun SpikeScreen() {
             val places = remember(hasStorage, store, status) {
                 val storageRoot = Environment.getExternalStorageDirectory()
                 listOfNotNull(
-                    Place(PlaceGroup.BOT, statusDot(status), store.botDir.name.let { if (it == "spike") "MyBot" else it }, store.botDir, isBotFolder = true),
+                    Place(PlaceGroup.BOT, statusDot(status), "MyBot（実行用）", store.botDir, isBotFolder = true),
+                    Place(PlaceGroup.SHARED, "📂", "MyBot（共有コピー）", BotController.sharedBotDir().takeIf { hasStorage }),
                     Place(PlaceGroup.SHARED, "📱", "内部ストレージ", storageRoot.takeIf { hasStorage }),
                     Place(PlaceGroup.SHARED, "📁", "Documents", File(storageRoot, Environment.DIRECTORY_DOCUMENTS).takeIf { hasStorage }),
-                    Place(PlaceGroup.SHARED, "📁", "PythonRunner", BotController.sharedBotsRoot().takeIf { hasStorage }),
                     Place(PlaceGroup.SHARED, "📥", "Download", File(storageRoot, Environment.DIRECTORY_DOWNLOADS).takeIf { hasStorage }),
                     Place(PlaceGroup.APP, "🐍", "Python本体", pyHome),
                     Place(PlaceGroup.APP, "📚", "ライブラリ", store.libsDir.apply { mkdirs() }),
@@ -236,7 +264,7 @@ fun SpikeScreen() {
                 OutlinedButton(enabled = !busy, onClick = { pickFile.launch(arrayOf("*/*")) }) {
                     Text("📄 .pyファイルを追加")
                 }
-                OutlinedButton(onClick = { filesVersion++ }) { Text("🔄 更新") }
+                OutlinedButton(onClick = { exportShared() }) { Text("🔄 更新") }
             }
         }
 
@@ -360,15 +388,35 @@ fun SpikeScreen() {
                 Button(
                     enabled = ready && mainFile != null && !busy,
                     onClick = {
-                        if (Build.VERSION.SDK_INT >= 33) {
-                            askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            BotController.start(context)
+                        scope.launch {
+                            val changes = withContext(Dispatchers.IO) {
+                                runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
+                            }
+                            if (changes != null && !changes.isEmpty) pendingImport = changes else launchBot()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Green),
                 ) { Text("起動") }
             }
+        }
+
+        pendingImport?.let { changes ->
+            SharedChangesDialog(
+                changes,
+                onImport = {
+                    pendingImport = null
+                    scope.launch {
+                        withContext(Dispatchers.IO) { BotController.sync(context)?.importChanges(changes) }
+                        filesVersion++
+                        launchBot()
+                    }
+                },
+                onSkip = {
+                    pendingImport = null
+                    launchBot()
+                },
+                onCancel = { pendingImport = null },
+            )
         }
 
         Section("6. ログ") {
@@ -394,6 +442,35 @@ fun SpikeScreen() {
             )
         }
     }
+}
+
+/** Asks before running anything that changed in the shared copy, where other apps can write too. */
+@Composable
+private fun SharedChangesDialog(changes: SyncChanges, onImport: () -> Unit, onSkip: () -> Unit, onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("共有のコピーが変わっています") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Documents/PythonRunner/MyBot で、次のファイルが変わっています。", fontSize = 13.sp)
+                changes.added.forEach { Text("＋ 追加：$it", color = Green, fontSize = 13.sp) }
+                changes.modified.forEach { Text("✎ 変更：$it", color = Color(0xFFF08C00), fontSize = 13.sp) }
+                changes.removed.forEach { Text("－ 削除：$it", color = Red, fontSize = 13.sp) }
+                Text(
+                    "自分で編集したものなら「取り込んで起動」を押してください。心当たりがない変更は、" +
+                        "他のアプリが書き換えた可能性があるので取り込まないでください。",
+                    fontSize = 12.sp, color = Color.DarkGray,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onImport) { Text("取り込んで起動") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onCancel) { Text("やめる") }
+                TextButton(onClick = onSkip) { Text("取り込まずに起動") }
+            }
+        },
+    )
 }
 
 private fun statusDot(status: BotStatus): String = when (status) {

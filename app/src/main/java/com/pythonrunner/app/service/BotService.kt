@@ -101,6 +101,8 @@ class BotService : Service() {
             LogLine(System.currentTimeMillis(), "終了しました（終了コード $exitCode）", status == BotStatus.CRASHED),
         )
         if (status == BotStatus.CRASHED) notifyCrash(exitCode)
+        // Show what the bot wrote (data files etc.) in the shared copy too.
+        thread(name = "bot-export") { runCatching { BotController.sync(this)?.export() } }
         // A new start may already be under way; leave its wake lock and service alone.
         if (runner.isActive) return
         releaseWakeLock()
