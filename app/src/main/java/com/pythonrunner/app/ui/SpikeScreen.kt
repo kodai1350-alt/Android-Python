@@ -13,6 +13,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -35,6 +37,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -57,6 +62,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -175,7 +182,7 @@ fun SpikeScreen() {
                 color = if (mainFile != null) Green else Gray,
                 fontWeight = FontWeight.Bold,
             )
-            FileTreeView(
+            FileExplorer(
                 root = store.botDir,
                 mainFile = mainFile,
                 refreshKey = filesVersion to status,
@@ -335,75 +342,102 @@ fun SpikeScreen() {
     }
 }
 
-/** The bot folder as a tree: folders open on tap, the main file is highlighted, any .py can become the main file. */
+/** The bot folder like a PC file explorer: address bar, up button, detail columns; tap a folder to open it. */
 @Composable
-private fun FileTreeView(root: File, mainFile: String?, refreshKey: Any, onSetMain: (String) -> Unit) {
-    val expanded = remember { mutableStateListOf<String>() }
-    val rows = remember(refreshKey, expanded.toList()) { flattenTree(root, root, 0, expanded.toSet()) }
-    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp))) {
-        Text(
-            "📍 アプリ内 › bots › ${root.name}",
-            color = Color(0xFF1C3FAA), fontSize = 12.sp,
+private fun FileExplorer(root: File, mainFile: String?, refreshKey: Any, onSetMain: (String) -> Unit) {
+    var current by remember { mutableStateOf("") }
+    // The bot may delete the folder being shown; fall back to the top.
+    val folder = if (File(root, current).isDirectory) current else ""
+    val entries = remember(refreshKey, folder) { FileTree.list(File(root, folder), root) }
+    val shape = RoundedCornerShape(8.dp)
+    Column(Modifier.fillMaxWidth().background(Color.White, shape).border(1.dp, Color(0xFFCED4DA), shape)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
-                .background(Color(0xFFE7ECFF), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-        )
-        if (rows.isEmpty()) {
-            Text("まだファイルがありません", color = Gray, modifier = Modifier.padding(10.dp))
+                .background(Color(0xFFF1F3F5), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                .padding(horizontal = 4.dp),
+        ) {
+            TextButton(enabled = folder.isNotEmpty(), onClick = { current = FileTree.parentOf(folder) }) { Text("⬆ 上へ") }
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+                FileTree.breadcrumbs(root.name, folder).forEachIndexed { i, (label, path) ->
+                    if (i > 0) Text(" › ", color = Gray)
+                    Text(
+                        (if (i == 0) "📁 " else "") + label,
+                        color = Color(0xFF1C3FAA),
+                        fontWeight = if (path == folder) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.clickable { current = path }.padding(vertical = 10.dp),
+                    )
+                }
+            }
         }
-        for ((entry, depth) in rows) {
-            FileRow(
-                entry, depth,
+        Row(Modifier.fillMaxWidth().background(Color(0xFFF8F9FA)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+            Text("名前", Modifier.weight(1f), fontSize = 12.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+            Text("更新日時", Modifier.width(76.dp), fontSize = 12.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+            Text("サイズ", Modifier.width(56.dp), fontSize = 12.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold, textAlign = TextAlign.End)
+        }
+        HorizontalDivider()
+        if (entries.isEmpty()) {
+            Text("このフォルダは空です", color = Gray, modifier = Modifier.padding(12.dp))
+        }
+        for (entry in entries) {
+            ExplorerRow(
+                entry,
                 isMain = entry.relativePath == mainFile,
-                isOpen = entry.relativePath in expanded,
-                onToggle = { if (!expanded.remove(entry.relativePath)) expanded += entry.relativePath },
+                onOpen = { current = entry.relativePath },
                 onSetMain = { onSetMain(entry.relativePath) },
             )
         }
+        HorizontalDivider()
+        Text(
+            "${entries.size}個の項目　（フォルダは押すと開きます・ファイルは押すとメニュー）",
+            fontSize = 11.sp, color = Gray,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+        )
     }
 }
 
 @Composable
-private fun FileRow(entry: FileEntry, depth: Int, isMain: Boolean, isOpen: Boolean, onToggle: () -> Unit, onSetMain: () -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
-            .background(if (isMain) Color(0xFFEBFBEE) else Color.Transparent)
-            .then(if (entry.isDirectory) Modifier.clickable(onClick = onToggle) else Modifier)
-            .padding(start = (10 + depth * 18).dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-    ) {
-        if (isMain) Box(Modifier.width(4.dp).height(32.dp).background(Green))
-        Text(
-            (if (entry.isDirectory) (if (isOpen) "▾ " else "▸ ") else "") + FileTree.icon(entry.name, entry.isDirectory),
-            fontSize = 18.sp, modifier = Modifier.padding(horizontal = 6.dp),
-        )
-        Column(Modifier.weight(1f)) {
-            Text(entry.name, fontWeight = if (isMain || entry.isDirectory) FontWeight.Bold else FontWeight.Normal)
-            when {
-                isMain -> Text("▶ 最初に実行", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.background(Green, RoundedCornerShape(8.dp)).padding(horizontal = 6.dp, vertical = 1.dp))
-                entry.isDirectory -> Text("${entry.childCount}個", color = Gray, fontSize = 11.sp)
-                else -> Text(
-                    FileTree.formatSize(entry.sizeBytes) + "・" + DATE_FORMAT.format(Date(entry.modifiedMillis)),
-                    color = Gray, fontSize = 11.sp,
+private fun ExplorerRow(entry: FileEntry, isMain: Boolean, onOpen: () -> Unit, onSetMain: () -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+                .background(if (isMain) Color(0xFFEBFBEE) else Color.Transparent)
+                .clickable { if (entry.isDirectory) onOpen() else menuOpen = true }
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Text(FileTree.icon(entry.name, entry.isDirectory), fontSize = 18.sp)
+            Spacer(Modifier.width(6.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal,
                 )
+                if (isMain) {
+                    Text(
+                        "▶ 最初に実行", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.background(Green, RoundedCornerShape(8.dp)).padding(horizontal = 6.dp),
+                    )
+                }
             }
+            Text(DATE_FORMAT.format(Date(entry.modifiedMillis)), Modifier.width(76.dp), fontSize = 11.sp, color = Gray)
+            Text(
+                if (entry.isDirectory) "${entry.childCount}個" else FileTree.formatSize(entry.sizeBytes),
+                Modifier.width(56.dp), fontSize = 11.sp, color = Gray, textAlign = TextAlign.End,
+            )
         }
-        if (!entry.isDirectory && !isMain && entry.name.endsWith(".py")) {
-            TextButton(onClick = onSetMain) { Text("これを最初に実行", fontSize = 12.sp) }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            if (isMain) {
+                DropdownMenuItem(text = { Text("✓ 最初に実行するファイルです") }, enabled = false, onClick = {})
+            } else if (entry.name.endsWith(".py")) {
+                DropdownMenuItem(text = { Text("▶ これを最初に実行") }, onClick = { onSetMain(); menuOpen = false })
+            }
+            DropdownMenuItem(text = { Text("📍 ${entry.relativePath}", fontSize = 12.sp) }, enabled = false, onClick = {})
+            DropdownMenuItem(text = { Text("閉じる") }, onClick = { menuOpen = false })
         }
     }
 }
-
-private fun flattenTree(dir: File, root: File, depth: Int, expanded: Set<String>): List<Pair<FileEntry, Int>> =
-    FileTree.list(dir, root).flatMap { entry ->
-        val row = listOf(entry to depth)
-        if (entry.isDirectory && entry.relativePath in expanded) {
-            row + flattenTree(File(root, entry.relativePath), root, depth + 1, expanded)
-        } else {
-            row
-        }
-    }
 
 private val DATE_FORMAT = SimpleDateFormat("M/d HH:mm", Locale.JAPAN)
 

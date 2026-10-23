@@ -44,6 +44,17 @@ class FileTreeTest {
         assertEquals(emptyList(), FileTree.list(File(root, "nope"), root))
     }
 
+    @Test fun breadcrumbsFromRootToFolder() {
+        assertEquals(listOf("spike" to "", "cogs" to "cogs", "data" to "cogs/data"), FileTree.breadcrumbs("spike", "cogs/data"))
+        assertEquals(listOf("spike" to ""), FileTree.breadcrumbs("spike", ""))
+    }
+
+    @Test fun parentFolder() {
+        assertEquals("cogs", FileTree.parentOf("cogs/data"))
+        assertEquals("", FileTree.parentOf("cogs"))
+        assertEquals("", FileTree.parentOf(""))
+    }
+
     @Test fun formatsSizes() {
         assertEquals("0 B", FileTree.formatSize(0))
         assertEquals("999 B", FileTree.formatSize(999))

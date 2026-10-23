@@ -30,6 +30,14 @@ object FileTree {
                 )
             }
 
+    /** Address-bar segments as (label, relative path) from the bot folder down to [path]. */
+    fun breadcrumbs(rootName: String, path: String): List<Pair<String, String>> {
+        val parts = path.split('/').filter { it.isNotEmpty() }
+        return listOf(rootName to "") + parts.indices.map { i -> parts[i] to parts.take(i + 1).joinToString("/") }
+    }
+
+    fun parentOf(path: String): String = path.substringBeforeLast('/', missingDelimiterValue = "")
+
     fun formatSize(bytes: Long): String = when {
         bytes < 1000 -> "$bytes B"
         bytes < 1024 * 1024 -> "${bytes / 1024} KB"
