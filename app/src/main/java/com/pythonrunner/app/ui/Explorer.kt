@@ -41,16 +41,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-enum class PlaceGroup(val title: String, val icon: String) {
-    BOT("⭐ Bot", "⭐"),
-    SHARED("📱 このスマホ（共有）", "📱"),
-    APP("🔒 アプリ専用", "🔒"),
+enum class PlaceGroup(val title: String) {
+    BOT("Bot"),
+    SHARED("このスマホ（共有）"),
+    APP("アプリ専用"),
 }
 
 /** A starting point in the left navigation, like "This PC" entries in a PC file explorer. */
 data class Place(
     val group: PlaceGroup,
-    val icon: String,
     val label: String,
     /** null when the place cannot be opened yet (storage permission missing). */
     val root: File?,
@@ -91,7 +90,7 @@ fun Explorer(
             TextButton(onClick = { navOpen = !navOpen }) { Text("☰") }
             TextButton(enabled = folder.isNotEmpty(), onClick = { path = FileTree.parentOf(folder) }) { Text("⬆") }
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-                Text(place.group.icon + " ", fontSize = 13.sp)
+                Text(place.group.title + " › ", fontSize = 13.sp, color = Muted)
                 FileTree.breadcrumbs(place.label, folder).forEachIndexed { i, (label, segmentPath) ->
                     if (i > 0) Text(" › ", color = Muted, fontSize = 13.sp)
                     Text(
@@ -121,6 +120,7 @@ fun Explorer(
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 Row(Modifier.fillMaxWidth().background(Header).padding(horizontal = 8.dp, vertical = 3.dp)) {
                     Text("名前", Modifier.weight(1f), fontSize = 11.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+                    Text("種類", Modifier.width(KIND_WIDTH), fontSize = 11.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
                     if (!navOpen) Text("更新日時", Modifier.width(70.dp), fontSize = 11.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
                     Text("サイズ", Modifier.width(50.dp), fontSize = 11.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold, textAlign = TextAlign.End)
                 }
@@ -164,8 +164,8 @@ private fun NavPane(places: List<Place>, selected: Int, modifier: Modifier, onSe
                 )
             }
             Text(
-                place.icon + " " + place.label,
-                fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                place.label,
+                fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 fontWeight = if (index == selected) FontWeight.Bold else FontWeight.Normal,
                 color = if (place.root == null) Muted else Color.Unspecified,
                 modifier = Modifier.fillMaxWidth()
@@ -209,6 +209,7 @@ private fun EntryRow(
                     )
                 }
             }
+            Text(FileTree.kind(entry.name, entry.isDirectory), Modifier.width(KIND_WIDTH), fontSize = 10.sp, color = Muted, maxLines = 1)
             if (showDate) {
                 Text(DATE_FORMAT.format(Date(entry.modifiedMillis)), Modifier.width(70.dp), fontSize = 10.sp, color = Muted)
             }
@@ -232,6 +233,7 @@ private fun EntryRow(
     }
 }
 
+private val KIND_WIDTH = 58.dp
 private val Border = Color(0xFFCED4DA)
 private val Toolbar = Color(0xFFF1F3F5)
 private val Header = Color(0xFFF8F9FA)

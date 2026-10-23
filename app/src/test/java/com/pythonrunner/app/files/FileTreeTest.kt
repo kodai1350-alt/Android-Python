@@ -62,14 +62,20 @@ class FileTreeTest {
         assertEquals("1.5 MB", FileTree.formatSize(1_572_864))
     }
 
-    @Test fun iconsByKind() {
+    @Test fun onlyFolderAndFileIcons() {
         assertEquals("📁", FileTree.icon("cogs", isDirectory = true))
-        assertEquals("🐍", FileTree.icon("main.py", isDirectory = false))
-        assertEquals("🔑", FileTree.icon(".env", isDirectory = false))
-        assertEquals("📋", FileTree.icon("requirements.txt", isDirectory = false))
-        assertEquals("⚙️", FileTree.icon("config.json", isDirectory = false))
-        assertEquals("📝", FileTree.icon("README.md", isDirectory = false))
-        assertEquals("🖼", FileTree.icon("icon.PNG", isDirectory = false))
-        assertEquals("📄", FileTree.icon("data.bin", isDirectory = false))
+        assertEquals("📄", FileTree.icon("main.py", isDirectory = false))
+        assertEquals("📄", FileTree.icon(".env", isDirectory = false))
+    }
+
+    @Test fun kindsInWords() {
+        assertEquals("フォルダ", FileTree.kind("cogs", isDirectory = true))
+        assertEquals("Python", FileTree.kind("main.py", isDirectory = false))
+        assertEquals("秘密の値", FileTree.kind(".env", isDirectory = false))
+        assertEquals("ライブラリ一覧", FileTree.kind("requirements.txt", isDirectory = false))
+        assertEquals("設定", FileTree.kind("config.json", isDirectory = false))
+        assertEquals("テキスト", FileTree.kind("README.md", isDirectory = false))
+        assertEquals("画像", FileTree.kind("icon.PNG", isDirectory = false))
+        assertEquals("ファイル", FileTree.kind("data.bin", isDirectory = false))
     }
 }

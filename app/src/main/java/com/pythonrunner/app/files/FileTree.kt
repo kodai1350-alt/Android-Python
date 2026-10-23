@@ -44,17 +44,22 @@ object FileTree {
         else -> String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0))
     }
 
-    fun icon(name: String, isDirectory: Boolean): String {
-        if (isDirectory) return "📁"
+    /** Only folder vs file: the kind column says the rest in words. */
+    fun icon(name: String, isDirectory: Boolean): String = if (isDirectory) "📁" else "📄"
+
+    /** The "種類" column, like the Type column of a PC file explorer. */
+    fun kind(name: String, isDirectory: Boolean): String {
+        if (isDirectory) return "フォルダ"
         val lower = name.lowercase(Locale.ROOT)
+        val ext = lower.substringAfterLast('.', "")
         return when {
-            lower.endsWith(".py") -> "🐍"
-            lower == ".env" || lower.startsWith(".env.") -> "🔑"
-            lower == "requirements.txt" -> "📋"
-            lower.substringAfterLast('.') in CONFIG -> "⚙️"
-            lower.substringAfterLast('.') in TEXT -> "📝"
-            lower.substringAfterLast('.') in IMAGE -> "🖼"
-            else -> "📄"
+            ext == "py" -> "Python"
+            lower == ".env" || lower.startsWith(".env.") -> "秘密の値"
+            lower == "requirements.txt" -> "ライブラリ一覧"
+            ext in CONFIG -> "設定"
+            ext in TEXT -> "テキスト"
+            ext in IMAGE -> "画像"
+            else -> "ファイル"
         }
     }
 

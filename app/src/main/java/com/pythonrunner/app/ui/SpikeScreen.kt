@@ -237,13 +237,13 @@ fun SpikeScreen() {
             val places = remember(hasStorage, store, status) {
                 val storageRoot = Environment.getExternalStorageDirectory()
                 listOfNotNull(
-                    Place(PlaceGroup.BOT, statusDot(status), "MyBot（実行用）", store.botDir, isBotFolder = true),
-                    Place(PlaceGroup.SHARED, "📂", "MyBot（共有コピー）", BotController.sharedBotDir().takeIf { hasStorage }),
-                    Place(PlaceGroup.SHARED, "📱", "内部ストレージ", storageRoot.takeIf { hasStorage }),
-                    Place(PlaceGroup.SHARED, "📁", "Documents", File(storageRoot, Environment.DIRECTORY_DOCUMENTS).takeIf { hasStorage }),
-                    Place(PlaceGroup.SHARED, "📥", "Download", File(storageRoot, Environment.DIRECTORY_DOWNLOADS).takeIf { hasStorage }),
-                    Place(PlaceGroup.APP, "🐍", "Python本体", pyHome),
-                    Place(PlaceGroup.APP, "📚", "ライブラリ", store.libsDir.apply { mkdirs() }),
+                    Place(PlaceGroup.BOT, "MyBot（実行用）・${statusText(status)}", store.botDir, isBotFolder = true),
+                    Place(PlaceGroup.SHARED, "MyBot（共有コピー）", BotController.sharedBotDir().takeIf { hasStorage }),
+                    Place(PlaceGroup.SHARED, "内部ストレージ", storageRoot.takeIf { hasStorage }),
+                    Place(PlaceGroup.SHARED, "Documents", File(storageRoot, Environment.DIRECTORY_DOCUMENTS).takeIf { hasStorage }),
+                    Place(PlaceGroup.SHARED, "Download", File(storageRoot, Environment.DIRECTORY_DOWNLOADS).takeIf { hasStorage }),
+                    Place(PlaceGroup.APP, "Python本体", pyHome),
+                    Place(PlaceGroup.APP, "ライブラリ（pip）", store.libsDir.apply { mkdirs() }),
                 )
             }
             Explorer(
@@ -484,10 +484,11 @@ private fun SharedChangesDialog(changes: SyncChanges, onImport: () -> Unit, onSk
     )
 }
 
-private fun statusDot(status: BotStatus): String = when (status) {
-    BotStatus.RUNNING, BotStatus.STARTING -> "🟢"
-    BotStatus.CRASHED -> "🔴"
-    BotStatus.STOPPED -> "⚪"
+private fun statusText(status: BotStatus): String = when (status) {
+    BotStatus.RUNNING -> "稼働中"
+    BotStatus.STARTING -> "起動中"
+    BotStatus.CRASHED -> "エラー"
+    BotStatus.STOPPED -> "停止中"
 }
 
 /** One editable line of the secrets section. */
