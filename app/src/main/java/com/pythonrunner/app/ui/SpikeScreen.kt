@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Environment
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -13,8 +14,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,7 +28,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -37,9 +35,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -62,19 +57,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.duplicateNames
-import com.pythonrunner.app.files.FileEntry
-import com.pythonrunner.app.files.FileTree
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
@@ -95,7 +85,12 @@ fun SpikeScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val rt = remember { BotController.runtime(context) }
-    val store = remember { BotController.store(context) }
+    var hasStorage by remember { mutableStateOf(BotController.hasSharedStorageAccess(context)) }
+    // Coming back from the permission screen: re-check, and switch the bot folder if it was granted.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { hasStorage = BotController.hasSharedStorageAccess(context) }
+    val store = remember(hasStorage) { BotController.store(context) }
+    val uiPrefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
+    var secretsHelpOpen by remember { mutableStateOf(!uiPrefs.getBoolean("secretsHelpClosed", false)) }
 
     val status by BotController.status.collectAsStateWithLifecycle()
     val startedAt by BotController.startedAtMillis.collectAsStateWithLifecycle()
@@ -136,6 +131,19 @@ fun SpikeScreen() {
             } catch (e: Exception) {
                 workLog += LogLine(System.currentTimeMillis(), "ファイルを取り込めませんでした: ${e.message}", true)
             }
+        }
+    }
+
+    val askStorage = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        hasStorage = BotController.hasSharedStorageAccess(context)
+    }
+    fun requestStorage() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${context.packageName}"))
+            runCatching { context.startActivity(intent) }
+                .onFailure { context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+        } else {
+            askStorage.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE))
         }
     }
 
@@ -182,13 +190,46 @@ fun SpikeScreen() {
                 color = if (mainFile != null) Green else Gray,
                 fontWeight = FontWeight.Bold,
             )
-            FileExplorer(
-                root = store.botDir,
+            if (!hasStorage) {
+                Column(
+                    Modifier.fillMaxWidth().background(Color(0xFFFFF4E6), RoundedCornerShape(8.dp)).padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("📱 Botのファイルを、スマホのファイルアプリやPCからも見えるようにしませんか？", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text(
+                        "今はアプリ専用の場所（他のアプリから見えない）に置いています。ストレージへのアクセスを許可すると、" +
+                            "スマホの Documents/PythonRunner/MyBot に移します（今のファイルはそのままコピーされます）。",
+                        fontSize = 12.sp, color = Color.DarkGray,
+                    )
+                    Button(onClick = { requestStorage() }) { Text("ストレージへのアクセスを許可する") }
+                }
+            }
+            val pyHome = rt.home
+            val places = remember(hasStorage, store, status) {
+                val storageRoot = Environment.getExternalStorageDirectory()
+                listOfNotNull(
+                    Place(PlaceGroup.BOT, statusDot(status), store.botDir.name.let { if (it == "spike") "MyBot" else it }, store.botDir, isBotFolder = true),
+                    Place(PlaceGroup.SHARED, "📱", "内部ストレージ", storageRoot.takeIf { hasStorage }),
+                    Place(PlaceGroup.SHARED, "📁", "Documents", File(storageRoot, Environment.DIRECTORY_DOCUMENTS).takeIf { hasStorage }),
+                    Place(PlaceGroup.SHARED, "📁", "PythonRunner", BotController.sharedBotsRoot().takeIf { hasStorage }),
+                    Place(PlaceGroup.SHARED, "📥", "Download", File(storageRoot, Environment.DIRECTORY_DOWNLOADS).takeIf { hasStorage }),
+                    Place(PlaceGroup.APP, "🐍", "Python本体", pyHome),
+                    Place(PlaceGroup.APP, "📚", "ライブラリ", store.libsDir.apply { mkdirs() }),
+                )
+            }
+            Explorer(
+                places = places,
                 mainFile = mainFile,
                 refreshKey = filesVersion to status,
                 onSetMain = { path ->
                     store.mainFile = path
                     mainFile = path
+                },
+                lockedMessage = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("ここを見るには、ストレージへのアクセスの許可が必要です。", fontSize = 12.sp)
+                        TextButton(onClick = { requestStorage() }) { Text("許可する") }
+                    }
                 },
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -236,13 +277,26 @@ fun SpikeScreen() {
         }
 
         Section("4. 秘密の値（トークンなど）※使わなくてもOK") {
-            Text(
-                "トークンをBotのコードに直接書かずに済ませるための保管場所です。" +
-                    "ここに入れた値は、Botの中で os.environ[\"名前\"] で読めます。" +
-                    "コードにトークンを直接書いているなら、ここは空のままで大丈夫です。",
-                fontSize = 13.sp,
-                color = Color.DarkGray,
-            )
+            if (secretsHelpOpen) {
+                Column(Modifier.fillMaxWidth().background(Color(0xFFF1F3F5), RoundedCornerShape(8.dp)).padding(8.dp)) {
+                    Text(
+                        "トークンをBotのコードに直接書かずに済ませるための保管場所です。" +
+                            "ここに入れた値は、Botの中で os.environ[\"名前\"] で読めます。" +
+                            "コードにトークンを直接書いているなら、ここは空のままで大丈夫です。",
+                        fontSize = 13.sp,
+                        color = Color.DarkGray,
+                    )
+                    TextButton(onClick = {
+                        secretsHelpOpen = false
+                        uiPrefs.edit().putBoolean("secretsHelpClosed", true).apply()
+                    }) { Text("✕ 説明を閉じる") }
+                }
+            } else {
+                TextButton(onClick = {
+                    secretsHelpOpen = true
+                    uiPrefs.edit().putBoolean("secretsHelpClosed", false).apply()
+                }) { Text("ℹ 説明") }
+            }
             secrets.forEachIndexed { index, row ->
                 Column(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -342,104 +396,11 @@ fun SpikeScreen() {
     }
 }
 
-/** The bot folder like a PC file explorer: address bar, up button, detail columns; tap a folder to open it. */
-@Composable
-private fun FileExplorer(root: File, mainFile: String?, refreshKey: Any, onSetMain: (String) -> Unit) {
-    var current by remember { mutableStateOf("") }
-    // The bot may delete the folder being shown; fall back to the top.
-    val folder = if (File(root, current).isDirectory) current else ""
-    val entries = remember(refreshKey, folder) { FileTree.list(File(root, folder), root) }
-    val shape = RoundedCornerShape(8.dp)
-    Column(Modifier.fillMaxWidth().background(Color.White, shape).border(1.dp, Color(0xFFCED4DA), shape)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-                .background(Color(0xFFF1F3F5), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
-                .padding(horizontal = 4.dp),
-        ) {
-            TextButton(enabled = folder.isNotEmpty(), onClick = { current = FileTree.parentOf(folder) }) { Text("⬆ 上へ") }
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-                FileTree.breadcrumbs(root.name, folder).forEachIndexed { i, (label, path) ->
-                    if (i > 0) Text(" › ", color = Gray)
-                    Text(
-                        (if (i == 0) "📁 " else "") + label,
-                        color = Color(0xFF1C3FAA),
-                        fontWeight = if (path == folder) FontWeight.Bold else FontWeight.Normal,
-                        modifier = Modifier.clickable { current = path }.padding(vertical = 10.dp),
-                    )
-                }
-            }
-        }
-        Row(Modifier.fillMaxWidth().background(Color(0xFFF8F9FA)).padding(horizontal = 10.dp, vertical = 4.dp)) {
-            Text("名前", Modifier.weight(1f), fontSize = 12.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
-            Text("更新日時", Modifier.width(76.dp), fontSize = 12.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold)
-            Text("サイズ", Modifier.width(56.dp), fontSize = 12.sp, color = Color.DarkGray, fontWeight = FontWeight.Bold, textAlign = TextAlign.End)
-        }
-        HorizontalDivider()
-        if (entries.isEmpty()) {
-            Text("このフォルダは空です", color = Gray, modifier = Modifier.padding(12.dp))
-        }
-        for (entry in entries) {
-            ExplorerRow(
-                entry,
-                isMain = entry.relativePath == mainFile,
-                onOpen = { current = entry.relativePath },
-                onSetMain = { onSetMain(entry.relativePath) },
-            )
-        }
-        HorizontalDivider()
-        Text(
-            "${entries.size}個の項目　（フォルダは押すと開きます・ファイルは押すとメニュー）",
-            fontSize = 11.sp, color = Gray,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-        )
-    }
+private fun statusDot(status: BotStatus): String = when (status) {
+    BotStatus.RUNNING, BotStatus.STARTING -> "🟢"
+    BotStatus.CRASHED -> "🔴"
+    BotStatus.STOPPED -> "⚪"
 }
-
-@Composable
-private fun ExplorerRow(entry: FileEntry, isMain: Boolean, onOpen: () -> Unit, onSetMain: () -> Unit) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Box {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-                .background(if (isMain) Color(0xFFEBFBEE) else Color.Transparent)
-                .clickable { if (entry.isDirectory) onOpen() else menuOpen = true }
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-        ) {
-            Text(FileTree.icon(entry.name, entry.isDirectory), fontSize = 18.sp)
-            Spacer(Modifier.width(6.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal,
-                )
-                if (isMain) {
-                    Text(
-                        "▶ 最初に実行", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.background(Green, RoundedCornerShape(8.dp)).padding(horizontal = 6.dp),
-                    )
-                }
-            }
-            Text(DATE_FORMAT.format(Date(entry.modifiedMillis)), Modifier.width(76.dp), fontSize = 11.sp, color = Gray)
-            Text(
-                if (entry.isDirectory) "${entry.childCount}個" else FileTree.formatSize(entry.sizeBytes),
-                Modifier.width(56.dp), fontSize = 11.sp, color = Gray, textAlign = TextAlign.End,
-            )
-        }
-        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            if (isMain) {
-                DropdownMenuItem(text = { Text("✓ 最初に実行するファイルです") }, enabled = false, onClick = {})
-            } else if (entry.name.endsWith(".py")) {
-                DropdownMenuItem(text = { Text("▶ これを最初に実行") }, onClick = { onSetMain(); menuOpen = false })
-            }
-            DropdownMenuItem(text = { Text("📍 ${entry.relativePath}", fontSize = 12.sp) }, enabled = false, onClick = {})
-            DropdownMenuItem(text = { Text("閉じる") }, onClick = { menuOpen = false })
-        }
-    }
-}
-
-private val DATE_FORMAT = SimpleDateFormat("M/d HH:mm", Locale.JAPAN)
 
 /** One editable line of the secrets section. */
 private data class SecretRow(val name: String, val value: String, val shown: Boolean = false)

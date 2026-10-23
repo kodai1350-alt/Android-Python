@@ -38,6 +38,14 @@ class SpikeBotStoreTest {
         assertFalse(File(store.botDir.parentFile, "evil.py").exists())
     }
 
+    @Test fun botFolderCanLiveElsewhere() {
+        val shared = File(base, "shared/Documents/PythonRunner/MyBot")
+        val store = SpikeBotStore(base, prefs, botDir = shared)
+        store.importPy("bot.py", "print(1)".byteInputStream())
+        assertEquals("print(1)", File(shared, "bot.py").readText())
+        assertEquals(File(base, "bots/spike-libs"), store.libsDir)
+    }
+
     @Test fun wasRunningDefaultsToFalse() {
         val store = SpikeBotStore(base, prefs)
         assertFalse(store.wasRunning)

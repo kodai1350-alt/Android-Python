@@ -11,8 +11,12 @@ interface KeyValue {
 }
 
 /** Storage for the single bot of the trial version. */
-class SpikeBotStore(private val baseDir: File, private val prefs: KeyValue) {
-    val botDir: File = File(baseDir, "bots/spike")
+class SpikeBotStore(
+    private val baseDir: File,
+    private val prefs: KeyValue,
+    /** Where the bot's own files live: app-private by default, shared storage once allowed. */
+    val botDir: File = File(baseDir, "bots/spike"),
+) {
     val libsDir: File = File(baseDir, "bots/spike-libs")
 
     var mainFile: String?

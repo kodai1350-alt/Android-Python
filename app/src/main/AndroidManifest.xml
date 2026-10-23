@@ -7,10 +7,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Bot files live in Documents/PythonRunner so the Files app and a PC can see them. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- No backups: SharedPreferences hold the user's bot tokens. -->
     <application
         android:allowBackup="false"
+        android:requestLegacyExternalStorage="true"
         android:label="Python Runner"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
