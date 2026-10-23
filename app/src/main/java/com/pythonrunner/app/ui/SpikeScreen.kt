@@ -229,6 +229,7 @@ fun SpikeScreen() {
                             ".env などの秘密のファイルはコピーしません。",
                         fontSize = 12.sp, color = Color.DarkGray,
                     )
+                    Text(SHARED_WARNING, fontSize = 12.sp, color = Color(0xFFC92A2A))
                     Button(onClick = { requestStorage() }) { Text("ストレージへのアクセスを許可する") }
                 }
             }
@@ -266,6 +267,7 @@ fun SpikeScreen() {
                 }
                 OutlinedButton(onClick = { exportShared() }) { Text("🔄 更新") }
             }
+            if (hasStorage) Text(SHARED_WARNING, fontSize = 11.sp, color = Color(0xFFC92A2A))
         }
 
         Section("3. ライブラリ（pip install）") {
@@ -406,9 +408,14 @@ fun SpikeScreen() {
                 onImport = {
                     pendingImport = null
                     scope.launch {
-                        withContext(Dispatchers.IO) { BotController.sync(context)?.importChanges(changes) }
+                        // Files changed again after confirming are not imported: ask again instead of starting.
+                        val again = withContext(Dispatchers.IO) {
+                            val sync = BotController.sync(context)
+                            val skipped = sync?.importChanges(changes).orEmpty()
+                            if (skipped.isEmpty()) null else sync?.pendingImports()
+                        }
                         filesVersion++
-                        launchBot()
+                        if (again != null && !again.isEmpty) pendingImport = again else launchBot()
                     }
                 },
                 onSkip = {
@@ -443,6 +450,10 @@ fun SpikeScreen() {
         }
     }
 }
+
+private const val SHARED_WARNING =
+    "⚠ 共有のコピーは、ストレージの許可を持つ他のアプリからも読めます。トークンは .py や config.json などに書かず、" +
+        "「4. 秘密の値」（アプリ専用）に入れてください。.env・鍵・データベース、名前に token や secret を含むファイルはコピーしません。"
 
 /** Asks before running anything that changed in the shared copy, where other apps can write too. */
 @Composable

@@ -111,6 +111,63 @@ class FolderSyncTest {
         assertEquals("mine", read(private, "main.py"))
     }
 
+    @Test fun secretLookingNamesAreNeverShared() {
+        listOf(
+            ".env", ".env.local", "bot.session", "server.pem", "private.key", "cert.p12", "cert.pfx",
+            "data.db", "cache.sqlite", "cache.sqlite3", "token.txt", "Discord_TOKEN.json",
+            "secrets.json", "credentials.json", "password.txt",
+        ).forEach { assertTrue(FolderSync.isSecret(it), it) }
+        listOf("main.py", "config.json", "data.json", "README.md", "requirements.txt")
+            .forEach { assertFalse(FolderSync.isSecret(it), it) }
+    }
+
+    @Test fun exportSkipsKeysAndDatabases() {
+        write(private, "main.py", "x")
+        write(private, "data/users.db", "x")
+        write(private, "keys/bot.key", "x")
+        sync.export()
+        assertTrue(File(shared, "main.py").exists())
+        assertFalse(File(shared, "data/users.db").exists())
+        assertFalse(File(shared, "keys/bot.key").exists())
+    }
+
+    @Test fun importSkipsFilesThatChangedAfterTheUserConfirmed() {
+        write(private, "main.py", "print(1)")
+        sync.export()
+        write(shared, "main.py", "what the user saw")
+        val confirmed = sync.pendingImports()
+        write(shared, "main.py", "swapped afterwards")
+        val skipped = sync.importChanges(confirmed)
+        assertEquals(listOf("main.py"), skipped)
+        assertEquals("print(1)", read(private, "main.py"))
+        assertEquals(listOf("main.py"), sync.pendingImports().modified)
+    }
+
+    @Test fun importNeverTouchesFilesOutsideTheBotFolder() {
+        val outside = write(root, "outside.txt", "keep me")
+        write(private, "main.py", "x")
+        sync.export()
+        val forged = SyncChanges(added = listOf("../shared/../outside.txt"), modified = emptyList(), removed = listOf("../outside.txt"))
+        sync.importChanges(forged)
+        assertEquals("keep me", outside.readText())
+    }
+
+    @Test fun forgedManifestEntriesAreIgnored() {
+        val outside = write(root, "outside.txt", "keep me")
+        File(root, "manifest.txt").writeText("abc\t../outside.txt\nabc\t/etc/passwd\n")
+        val changes = sync.pendingImports()
+        assertTrue(changes.removed.isEmpty(), changes.toString())
+        sync.importChanges(SyncChanges(emptyList(), emptyList(), listOf("../outside.txt")))
+        assertEquals("keep me", outside.readText())
+    }
+
+    @Test fun unsafeNamesAreRejected() {
+        listOf("../a.py", "a/../../b.py", "/abs.py", "a\nb.py", "a\tb.py", "a\rb.py", "")
+            .forEach { assertFalse(FolderSync.isSafePath(it), it) }
+        listOf("main.py", "cogs/music.py", "data/a b.json")
+            .forEach { assertTrue(FolderSync.isSafePath(it), it) }
+    }
+
     @Test fun secretLookingFilesInSharedAreIgnored() {
         sync.export()
         write(shared, ".env", "TOKEN=evil")
