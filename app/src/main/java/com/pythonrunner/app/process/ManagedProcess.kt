@@ -29,7 +29,15 @@ class ManagedProcess(
         )
         thread(name = "process-wait", isDaemon = true) {
             val code = p.waitFor()
-            readers.forEach { it.join() }
+            // A grandchild can keep the pipes open forever; don't let it hold back onExit.
+            readers.forEach { it.join(READER_DRAIN_MILLIS) }
+            if (readers.any { it.isAlive }) {
+                // close() can block while a read is pending, so do it off this thread.
+                thread(name = "process-close", isDaemon = true) {
+                    runCatching { p.inputStream.close() }
+                    runCatching { p.errorStream.close() }
+                }
+            }
             onExit(code)
         }
     }
@@ -46,8 +54,14 @@ class ManagedProcess(
 
     private fun pump(stream: InputStream, isError: Boolean) =
         thread(name = if (isError) "process-stderr" else "process-stdout", isDaemon = true) {
-            stream.bufferedReader(Charsets.UTF_8).useLines { lines ->
-                lines.forEach { onLine(LogLine(System.currentTimeMillis(), it, isError)) }
+            runCatching {
+                stream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.forEach { onLine(LogLine(System.currentTimeMillis(), it, isError)) }
+                }
             }
         }
+
+    private companion object {
+        const val READER_DRAIN_MILLIS = 2000L
+    }
 }

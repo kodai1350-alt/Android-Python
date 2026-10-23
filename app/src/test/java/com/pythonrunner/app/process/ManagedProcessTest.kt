@@ -49,7 +49,7 @@ class ManagedProcessTest {
 
     @Test fun forceKillsAfterGrace() {
         assumeFalse(isWindows)
-        val p = process(shell("trap '' TERM; sleep 30"))
+        val p = process(shell("trap '' TERM; exec sleep 30"))
         p.start()
         Thread.sleep(300)
         val started = System.nanoTime()
@@ -57,6 +57,15 @@ class ManagedProcessTest {
         assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(3))
         assertFalse(p.isRunning)
         awaitExit()
+    }
+
+    @Test fun grandchildHoldingPipesDoesNotDelayExit() {
+        // The background child inherits stdout and keeps the pipe open after the shell exits.
+        val started = System.nanoTime()
+        process(shell(if (isWindows) "start /b ping -n 30 127.0.0.1 & echo started" else "sleep 30 & echo started")).start()
+        assertTrue(exited.await(8, TimeUnit.SECONDS), "onExit waited for the grandchild")
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(8))
+        assertEquals(0, exitCode)
     }
 
     @Test fun stopIsSafeWhenNotRunning() {
