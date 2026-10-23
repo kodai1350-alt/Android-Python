@@ -25,6 +25,17 @@ android {
         buildConfigField("String", "PYTHON_VERSION", "\"${property("pythonVersion")}\"")
     }
 
+    // Release signing comes from CI secrets; without KEYSTORE_FILE the release build stays unsigned.
+    System.getenv("KEYSTORE_FILE")?.let { keystore ->
+        signingConfigs.create("release") {
+            storeFile = file(keystore)
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+        buildTypes.getByName("release").signingConfig = signingConfigs.getByName("release")
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
