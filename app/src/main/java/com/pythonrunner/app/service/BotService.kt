@@ -12,8 +12,8 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.pythonrunner.app.MainActivity
+import com.pythonrunner.app.bot.BotRunner
 import com.pythonrunner.app.bot.BotStatus
-import com.pythonrunner.app.bot.statusForExit
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.process.ManagedProcess
 import java.io.File
@@ -21,9 +21,36 @@ import kotlin.concurrent.thread
 
 /** Keeps the bot process alive with the screen off: foreground notification plus a partial wake lock. */
 class BotService : Service() {
-    @Volatile private var process: ManagedProcess? = null
-    @Volatile private var stoppedByUser = false
-    private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var wakeLock: PowerManager.WakeLock? = null
+
+    private val runner by lazy {
+        val store = BotController.store(this)
+        val rt = BotController.runtime(this)
+        BotRunner(
+            prepare = { rt.ensureInstalled() },
+            createProcess = { onLine, onExit ->
+                val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
+                ManagedProcess(
+                    rt.command(File(store.botDir, main).path),
+                    rt.environment(listOf(store.libsDir), store.envVars),
+                    store.botDir, onLine, onExit,
+                )
+            },
+            listener = object : BotRunner.Listener {
+                override fun onStatus(status: BotStatus, sinceMillis: Long?) {
+                    if (status == BotStatus.RUNNING && sinceMillis != null) {
+                        BotController.setRunning(sinceMillis)
+                    } else {
+                        BotController.setStatus(status)
+                    }
+                }
+
+                override fun onLine(line: LogLine) = BotController.appendLog(line)
+
+                override fun onFinished(status: BotStatus, exitCode: Int) = onBotFinished(status, exitCode)
+            },
+        )
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,58 +72,38 @@ class BotService : Service() {
         return START_STICKY
     }
 
+    override fun onDestroy() {
+        if (runner.isActive) thread(name = "bot-stop") { runner.stop() }
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
     private fun startBot() {
-        if (process?.isRunning == true) return
+        // Always go foreground: startForegroundService() requires it even when already running.
         goForeground()
+        if (!runner.start()) return
         acquireWakeLock()
-        stoppedByUser = false
-        val store = BotController.store(this)
-        val rt = BotController.runtime(this)
-        store.wasRunning = true
-        BotController.setStatus(BotStatus.STARTING)
-        thread(name = "bot-start") {
-            try {
-                rt.ensureInstalled()
-                val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
-                val p = ManagedProcess(
-                    rt.command(File(store.botDir, main).path),
-                    rt.environment(listOf(store.libsDir), store.envVars),
-                    store.botDir,
-                    BotController::appendLog,
-                    ::onExit,
-                )
-                process = p
-                p.start()
-                BotController.setRunning(System.currentTimeMillis())
-            } catch (e: Exception) {
-                BotController.appendLog(LogLine(System.currentTimeMillis(), "起動できませんでした: ${e.message}", true))
-                onExit(-1)
-            }
-        }
+        BotController.store(this).wasRunning = true
     }
 
     private fun stopBot() {
-        stoppedByUser = true
         BotController.store(this).wasRunning = false
-        val p = process
-        if (p == null) {
+        if (runner.isActive) {
+            thread(name = "bot-stop") { runner.stop() }
+        } else {
             BotController.setStatus(BotStatus.STOPPED)
             stopSelf()
-        } else {
-            thread(name = "bot-stop") { p.stop() }
         }
     }
 
-    private fun onExit(code: Int) {
-        val status = statusForExit(code, stoppedByUser)
+    private fun onBotFinished(status: BotStatus, exitCode: Int) {
         BotController.appendLog(
-            LogLine(System.currentTimeMillis(), "終了しました（終了コード $code）", status == BotStatus.CRASHED),
+            LogLine(System.currentTimeMillis(), "終了しました（終了コード $exitCode）", status == BotStatus.CRASHED),
         )
-        BotController.setStatus(status)
-        if (status == BotStatus.CRASHED) notifyCrash(code)
-        process = null
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        if (status == BotStatus.CRASHED) notifyCrash(exitCode)
+        // A new start may already be under way; leave its wake lock and service alone.
+        if (runner.isActive) return
+        releaseWakeLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -125,11 +132,18 @@ class BotService : Service() {
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_CRASH, notification)
     }
 
+    @Synchronized
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PythonRunner:bot")
             .apply { acquire() }
+    }
+
+    @Synchronized
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
     }
 
     private fun createChannels() {
