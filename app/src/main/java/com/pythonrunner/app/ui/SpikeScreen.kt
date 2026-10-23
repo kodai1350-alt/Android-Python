@@ -38,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,10 +55,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pythonrunner.app.bot.BotStatus
+import com.pythonrunner.app.bot.duplicateNames
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
@@ -92,9 +95,10 @@ fun SpikeScreen() {
     var mainFile by remember { mutableStateOf(store.mainFile) }
     var packages by remember { mutableStateOf("pip install discord.py") }
     val secrets = remember {
-        mutableStateListOf<Pair<String, String>>().apply { addAll(store.envVars.toList()) }
+        mutableStateListOf<SecretRow>().apply { addAll(store.envVars.map { (k, v) -> SecretRow(k, v) }) }
     }
-    var secretsSaved by remember { mutableStateOf(false) }
+    var savedSecrets by remember { mutableStateOf(store.envVars) }
+    var justSaved by remember { mutableStateOf(false) }
 
     // Runs one Python command and streams its output into the work log.
     fun runWork(command: List<String>, then: (Int) -> Unit = {}) {
@@ -203,30 +207,63 @@ fun SpikeScreen() {
             }
         }
 
-        Section("4. 秘密の値（トークンなど）") {
-            secrets.forEachIndexed { index, (name, value) ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = name, onValueChange = { secrets[index] = it to value; secretsSaved = false },
-                        label = { Text("名前") }, singleLine = true, modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    OutlinedTextField(
-                        value = value, onValueChange = { secrets[index] = name to it; secretsSaved = false },
-                        label = { Text("値") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.weight(1f),
-                    )
+        Section("4. 秘密の値（トークンなど）※使わなくてもOK") {
+            Text(
+                "トークンをBotのコードに直接書かずに済ませるための保管場所です。" +
+                    "ここに入れた値は、Botの中で os.environ[\"名前\"] で読めます。" +
+                    "コードにトークンを直接書いているなら、ここは空のままで大丈夫です。",
+                fontSize = 13.sp,
+                color = Color.DarkGray,
+            )
+            secrets.forEachIndexed { index, row ->
+                Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = row.name, onValueChange = { secrets[index] = row.copy(name = it); justSaved = false },
+                            label = { Text("名前") }, singleLine = true, modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedTextField(
+                            value = row.value, onValueChange = { secrets[index] = row.copy(value = it); justSaved = false },
+                            label = { Text("値") }, singleLine = true,
+                            visualTransformation = if (row.shown) VisualTransformation.None else PasswordVisualTransformation(),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = { secrets[index] = row.copy(shown = !row.shown) }) {
+                            Text(if (row.shown) "🙈 隠す" else "👁 表示")
+                        }
+                        TextButton(onClick = { secrets.removeAt(index); justSaved = false }) {
+                            Text("🗑 削除", color = Red)
+                        }
+                    }
                 }
             }
+            val duplicates = duplicateNames(secrets.map { it.name })
+            if (duplicates.isNotEmpty()) {
+                Text(
+                    "同じ名前が2つ以上あります：${duplicates.joinToString(", ")}（下の行の値が使われます）",
+                    color = Red, fontSize = 12.sp,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { secrets += "TOKEN" to ""; secretsSaved = false }) { Text("＋追加") }
+                OutlinedButton(onClick = {
+                    secrets += SecretRow(if (secrets.none { it.name.trim() == "TOKEN" }) "TOKEN" else "", "")
+                    justSaved = false
+                }) { Text("＋追加") }
                 Button(onClick = {
-                    store.envVars = secrets.filter { it.first.isNotBlank() }.toMap()
-                    secretsSaved = true
+                    store.envVars = secrets.filter { it.name.isNotBlank() }.associate { it.name.trim() to it.value }
+                    savedSecrets = store.envVars
+                    justSaved = true
                 }) { Text("保存") }
             }
-            if (secretsSaved) Text("✓ 保存しました（次の起動から使われます）", color = Green, fontSize = 12.sp)
+            val current = secrets.filter { it.name.isNotBlank() }.associate { it.name.trim() to it.value }
+            when {
+                current != savedSecrets -> Text("まだ保存していません（「保存」を押すと次の起動から使われます）", color = Red, fontSize = 12.sp)
+                justSaved -> Text("✓ 保存しました（次の起動から使われます）", color = Green, fontSize = 12.sp)
+                savedSecrets.isNotEmpty() -> Text("保存済み：${savedSecrets.keys.joinToString(", ")}", color = Gray, fontSize = 12.sp)
+            }
         }
 
         Section("5. 実行") {
@@ -276,6 +313,9 @@ fun SpikeScreen() {
         }
     }
 }
+
+/** One editable line of the secrets section. */
+private data class SecretRow(val name: String, val value: String, val shown: Boolean = false)
 
 /** The outcome of a one-shot job (preparing Python, pip install), shown so success or failure is unmistakable. */
 private sealed class WorkResult(val message: String) {
