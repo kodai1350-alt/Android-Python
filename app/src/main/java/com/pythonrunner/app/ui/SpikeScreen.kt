@@ -33,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -68,7 +69,7 @@ private val Red = Color(0xFFE03131)
 private val Gray = Color(0xFFADB5BD)
 
 private const val SELF_CHECK =
-    "import sys, ssl, sqlite3, ctypes; print(sys.version); print(ssl.OPENSSL_VERSION)"
+    "import sys, ssl, sqlite3, ctypes; print('Python', sys.version.split()[0]); print(ssl.OPENSSL_VERSION)"
 
 /** The trial version's single screen: work through the sections top to bottom to run one bot. */
 @Composable
@@ -85,6 +86,8 @@ fun SpikeScreen() {
     val workLog = remember { mutableStateListOf<LogLine>() }
     var busy by remember { mutableStateOf(false) }
     var ready by remember { mutableStateOf(rt.isPipInstalled()) }
+    var prepResult by remember { mutableStateOf<WorkResult?>(null) }
+    var installResult by remember { mutableStateOf<WorkResult?>(null) }
     var mainFile by remember { mutableStateOf(store.mainFile) }
     var packages by remember { mutableStateOf("discord.py") }
     val secrets = remember {
@@ -126,15 +129,27 @@ fun SpikeScreen() {
         Text("Python Runner（お試し版）", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
 
         Section("1. Pythonの準備") {
-            if (ready) Text("✓ 準備完了", color = Green, fontWeight = FontWeight.Bold)
+            WorkResultView(prepResult ?: if (ready) WorkResult.Done("準備完了") else WorkResult.Idle("まだ準備していません"))
             Button(enabled = !busy, onClick = {
                 workLog.clear()
+                prepResult = WorkResult.Working("準備中…（1分ほどかかることがあります）")
                 runWork(PipCommands.bootstrap(rt)) { code ->
-                    if (code == 0) {
-                        runWork(listOf(rt.executable.path, "-c", SELF_CHECK)) { checkCode ->
-                            ready = checkCode == 0
-                            busy = false
+                    if (code != 0) {
+                        ready = false
+                        prepResult = WorkResult.Failed("準備に失敗しました（pipを入れられませんでした）")
+                        return@runWork
+                    }
+                    val checkFrom = workLog.size
+                    runWork(listOf(rt.executable.path, "-c", SELF_CHECK)) { checkCode ->
+                        ready = checkCode == 0
+                        prepResult = if (ready) {
+                            val versions = workLog.drop(checkFrom).filter { !it.isError }
+                                .joinToString(" / ") { it.text }
+                            WorkResult.Done("準備完了：$versions")
+                        } else {
+                            WorkResult.Failed("準備に失敗しました（Pythonの動作確認でエラー）")
                         }
+                        busy = false
                     }
                 }
             }) { Text(if (ready) "もう一度準備する" else "Pythonを準備") }
@@ -157,10 +172,17 @@ fun SpikeScreen() {
                 label = { Text("パッケージ名（スペース区切り）") },
                 modifier = Modifier.fillMaxWidth(),
             )
+            installResult?.let { WorkResultView(it) }
             Button(enabled = !busy && ready && packages.isNotBlank(), onClick = {
                 workLog.clear()
                 val names = packages.trim().split(Regex("\\s+"))
+                installResult = WorkResult.Working("インストール中…")
                 runWork(PipCommands.install(rt, names, store.libsDir)) { code ->
+                    installResult = if (code == 0) {
+                        WorkResult.Done("インストール完了：${names.joinToString(", ")}")
+                    } else {
+                        WorkResult.Failed("インストールに失敗しました")
+                    }
                     if (code == 0) busy = false
                 }
             }) { Text("インストール") }
@@ -243,6 +265,33 @@ fun SpikeScreen() {
                 "ASUSの「自動起動マネージャー」（モバイルマネージャー内）で Python Runner を許可してください。",
                 fontSize = 13.sp,
             )
+        }
+    }
+}
+
+/** The outcome of a one-shot job (preparing Python, pip install), shown so success or failure is unmistakable. */
+private sealed class WorkResult(val message: String) {
+    class Idle(message: String) : WorkResult(message)
+    class Working(message: String) : WorkResult(message)
+    class Done(message: String) : WorkResult(message)
+    class Failed(message: String) : WorkResult(message)
+}
+
+@Composable
+private fun WorkResultView(result: WorkResult) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        when (result) {
+            is WorkResult.Working -> {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text(result.message, fontWeight = FontWeight.Bold)
+            }
+            is WorkResult.Done -> Text("✓ " + result.message, color = Green, fontWeight = FontWeight.Bold)
+            is WorkResult.Failed -> Column {
+                Text("✗ " + result.message, color = Red, fontWeight = FontWeight.Bold)
+                Text("下の「作業の出力」の「コピー」で内容を送ってください", color = Red, fontSize = 12.sp)
+            }
+            is WorkResult.Idle -> Text(result.message, color = Gray)
         }
     }
 }
