@@ -23,7 +23,9 @@ Androidスマホで Python のスクリプト（Discord Bot など）を、**画
 画面は上から順番に操作します。
 
 1. **Pythonの準備**: 「Pythonを準備」を押します。Python のバージョンと OpenSSL のバージョンが表示され、「✓ 準備完了」になれば成功です。
-2. **Botのファイル**: 「.pyファイルを選ぶ」で、Bot の .py ファイルを選びます。
+2. **Botのファイル**: 「.pyファイルを追加」で、Bot の .py ファイルを取り込みます。
+   下の一覧に Bot のフォルダの中身が表示されます（📁 フォルダはタップで開閉、Bot が作ったファイルもここに出ます）。
+   緑の「▶ 最初に実行」が起動するファイルです。別の .py にしたいときは、その行の「これを最初に実行」を押します。
 3. **ライブラリ（pip install）**: ネットで見つけた `pip install discord.py aiohttp` のようなコマンドを、そのまま貼り付けて「インストール」を押します。
    `pip3 install -U …`、`python -m pip install …`、複数行もそのまま使えます。パッケージ名だけを並べても大丈夫です。
    Bot が `ModuleNotFoundError: No module named 'xxx'` で止まったら、`xxx` を入れてインストールしてください。

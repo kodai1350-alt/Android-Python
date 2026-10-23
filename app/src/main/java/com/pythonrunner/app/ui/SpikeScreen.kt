@@ -13,6 +13,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -61,6 +62,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.duplicateNames
+import com.pythonrunner.app.files.FileEntry
+import com.pythonrunner.app.files.FileTree
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
@@ -93,6 +100,7 @@ fun SpikeScreen() {
     var prepResult by remember { mutableStateOf<WorkResult?>(null) }
     var installResult by remember { mutableStateOf<WorkResult?>(null) }
     var mainFile by remember { mutableStateOf(store.mainFile) }
+    var filesVersion by remember { mutableStateOf(0) }
     var packages by remember { mutableStateOf("pip install discord.py") }
     val secrets = remember {
         mutableStateListOf<SecretRow>().apply { addAll(store.envVars.map { (k, v) -> SecretRow(k, v) }) }
@@ -117,6 +125,7 @@ fun SpikeScreen() {
                 val name = displayName(context, uri) ?: "main.py"
                 context.contentResolver.openInputStream(uri)!!.use { store.importPy(name, it) }
                 mainFile = store.mainFile
+                filesVersion++
             } catch (e: Exception) {
                 workLog += LogLine(System.currentTimeMillis(), "ファイルを取り込めませんでした: ${e.message}", true)
             }
@@ -166,8 +175,20 @@ fun SpikeScreen() {
                 color = if (mainFile != null) Green else Gray,
                 fontWeight = FontWeight.Bold,
             )
-            OutlinedButton(enabled = !busy, onClick = { pickFile.launch(arrayOf("*/*")) }) {
-                Text("📄 .pyファイルを選ぶ")
+            FileTreeView(
+                root = store.botDir,
+                mainFile = mainFile,
+                refreshKey = filesVersion to status,
+                onSetMain = { path ->
+                    store.mainFile = path
+                    mainFile = path
+                },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(enabled = !busy, onClick = { pickFile.launch(arrayOf("*/*")) }) {
+                    Text("📄 .pyファイルを追加")
+                }
+                OutlinedButton(onClick = { filesVersion++ }) { Text("🔄 更新") }
             }
         }
 
@@ -313,6 +334,78 @@ fun SpikeScreen() {
         }
     }
 }
+
+/** The bot folder as a tree: folders open on tap, the main file is highlighted, any .py can become the main file. */
+@Composable
+private fun FileTreeView(root: File, mainFile: String?, refreshKey: Any, onSetMain: (String) -> Unit) {
+    val expanded = remember { mutableStateListOf<String>() }
+    val rows = remember(refreshKey, expanded.toList()) { flattenTree(root, root, 0, expanded.toSet()) }
+    Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp))) {
+        Text(
+            "📍 アプリ内 › bots › ${root.name}",
+            color = Color(0xFF1C3FAA), fontSize = 12.sp,
+            modifier = Modifier.fillMaxWidth()
+                .background(Color(0xFFE7ECFF), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        )
+        if (rows.isEmpty()) {
+            Text("まだファイルがありません", color = Gray, modifier = Modifier.padding(10.dp))
+        }
+        for ((entry, depth) in rows) {
+            FileRow(
+                entry, depth,
+                isMain = entry.relativePath == mainFile,
+                isOpen = entry.relativePath in expanded,
+                onToggle = { if (!expanded.remove(entry.relativePath)) expanded += entry.relativePath },
+                onSetMain = { onSetMain(entry.relativePath) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileRow(entry: FileEntry, depth: Int, isMain: Boolean, isOpen: Boolean, onToggle: () -> Unit, onSetMain: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+            .background(if (isMain) Color(0xFFEBFBEE) else Color.Transparent)
+            .then(if (entry.isDirectory) Modifier.clickable(onClick = onToggle) else Modifier)
+            .padding(start = (10 + depth * 18).dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+    ) {
+        if (isMain) Box(Modifier.width(4.dp).height(32.dp).background(Green))
+        Text(
+            (if (entry.isDirectory) (if (isOpen) "▾ " else "▸ ") else "") + FileTree.icon(entry.name, entry.isDirectory),
+            fontSize = 18.sp, modifier = Modifier.padding(horizontal = 6.dp),
+        )
+        Column(Modifier.weight(1f)) {
+            Text(entry.name, fontWeight = if (isMain || entry.isDirectory) FontWeight.Bold else FontWeight.Normal)
+            when {
+                isMain -> Text("▶ 最初に実行", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.background(Green, RoundedCornerShape(8.dp)).padding(horizontal = 6.dp, vertical = 1.dp))
+                entry.isDirectory -> Text("${entry.childCount}個", color = Gray, fontSize = 11.sp)
+                else -> Text(
+                    FileTree.formatSize(entry.sizeBytes) + "・" + DATE_FORMAT.format(Date(entry.modifiedMillis)),
+                    color = Gray, fontSize = 11.sp,
+                )
+            }
+        }
+        if (!entry.isDirectory && !isMain && entry.name.endsWith(".py")) {
+            TextButton(onClick = onSetMain) { Text("これを最初に実行", fontSize = 12.sp) }
+        }
+    }
+}
+
+private fun flattenTree(dir: File, root: File, depth: Int, expanded: Set<String>): List<Pair<FileEntry, Int>> =
+    FileTree.list(dir, root).flatMap { entry ->
+        val row = listOf(entry to depth)
+        if (entry.isDirectory && entry.relativePath in expanded) {
+            row + flattenTree(File(root, entry.relativePath), root, depth + 1, expanded)
+        } else {
+            row
+        }
+    }
+
+private val DATE_FORMAT = SimpleDateFormat("M/d HH:mm", Locale.JAPAN)
 
 /** One editable line of the secrets section. */
 private data class SecretRow(val name: String, val value: String, val shown: Boolean = false)
