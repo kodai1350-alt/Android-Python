@@ -60,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
+import com.pythonrunner.app.python.PipInput
 import com.pythonrunner.app.service.BotController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -89,7 +90,7 @@ fun SpikeScreen() {
     var prepResult by remember { mutableStateOf<WorkResult?>(null) }
     var installResult by remember { mutableStateOf<WorkResult?>(null) }
     var mainFile by remember { mutableStateOf(store.mainFile) }
-    var packages by remember { mutableStateOf("discord.py") }
+    var packages by remember { mutableStateOf("pip install discord.py") }
     val secrets = remember {
         mutableStateListOf<Pair<String, String>>().apply { addAll(store.envVars.toList()) }
     }
@@ -166,16 +167,23 @@ fun SpikeScreen() {
             }
         }
 
-        Section("3. ライブラリ") {
+        Section("3. ライブラリ（pip install）") {
             OutlinedTextField(
                 value = packages, onValueChange = { packages = it },
-                label = { Text("パッケージ名（スペース区切り）") },
+                label = { Text("pip install のコマンド（貼り付けOK）") },
+                placeholder = { Text("pip install discord.py aiohttp") },
+                minLines = 2,
                 modifier = Modifier.fillMaxWidth(),
             )
+            val names = PipInput.packages(packages)
+            Text(
+                if (names.isEmpty()) "インストールするものがありません" else "インストールするもの：${names.joinToString(", ")}",
+                color = if (names.isEmpty()) Gray else Color.DarkGray,
+                fontSize = 13.sp,
+            )
             installResult?.let { WorkResultView(it) }
-            Button(enabled = !busy && ready && packages.isNotBlank(), onClick = {
+            Button(enabled = !busy && ready && names.isNotEmpty(), onClick = {
                 workLog.clear()
-                val names = packages.trim().split(Regex("\\s+"))
                 installResult = WorkResult.Working("インストール中…")
                 runWork(PipCommands.install(rt, names, store.libsDir)) { code ->
                     installResult = if (code == 0) {
