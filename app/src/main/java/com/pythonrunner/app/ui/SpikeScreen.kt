@@ -43,6 +43,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -55,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -113,6 +115,13 @@ fun SpikeScreen() {
     }
     var savedSecrets by remember { mutableStateOf(store.envVars) }
     var justSaved by remember { mutableStateOf(false) }
+    var llmResult by remember { mutableStateOf<WorkResult?>(null) }
+    val view = LocalView.current
+    val measuring = llmResult is WorkResult.Working
+    DisposableEffect(measuring) {
+        view.keepScreenOn = measuring
+        onDispose { view.keepScreenOn = false }
+    }
 
     // Runs one Python command and streams its output into the work log.
     fun runWork(command: List<String>, then: (Int) -> Unit = {}) {
@@ -301,6 +310,31 @@ fun SpikeScreen() {
                     if (code == 0) busy = false
                 }
             }) { Text("インストール") }
+            if (!ready) Text("先に「1. Pythonの準備」をしてください", color = Gray, fontSize = 12.sp)
+        }
+
+        // Throwaway spike: measures how fast LFM3-VL-2B answers on this phone.
+        Section("LLMの速さテスト（お試し）") {
+            Text(
+                "LFM3-VL-2B（約1.25GB）をダウンロードして、返事の書き始めまでの時間を測ります。" +
+                    "初回はダウンロードに時間がかかります。終わるまでこの画面を開いたままにしてください（画面は自動で消えません）。",
+                fontSize = 13.sp, color = Color.DarkGray,
+            )
+            llmResult?.let { WorkResultView(it) }
+            Button(enabled = !busy && ready, onClick = {
+                workLog.clear()
+                llmResult = WorkResult.Working("測定中…（初回は20〜40分ほどかかります）")
+                val script = File(context.cacheDir, "llm_speed_test.py")
+                context.assets.open("llm_speed_test.py").use { input -> script.outputStream().use { input.copyTo(it) } }
+                runWork(listOf(rt.executable.path, script.path)) { code ->
+                    llmResult = if (code == 0) {
+                        WorkResult.Done("測定完了：下の「作業の出力」をコピーして送ってください")
+                    } else {
+                        WorkResult.Failed("測定に失敗しました：下の「作業の出力」をコピーして送ってください")
+                    }
+                    if (code == 0) busy = false
+                }
+            }) { Text("速さを測る") }
             if (!ready) Text("先に「1. Pythonの準備」をしてください", color = Gray, fontSize = 12.sp)
         }
 
