@@ -46,6 +46,6 @@ jobs:
           # Tags like v0.3.0-test1 are trials: publish them as pre-releases so "latest" stays stable.
           pre=""
           case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" "$apk" $pre \
+          gh release create "$GITHUB_REF_NAME" "$apk" bots/askbot/askbot.py $pre \
             --title "$GITHUB_REF_NAME" \
             --notes "スマホのブラウザで ${apk} をダウンロードしてインストールしてください。手順は README を見てください。"
