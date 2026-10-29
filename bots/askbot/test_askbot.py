@@ -328,3 +328,156 @@ def test_latest(tmp_path):
 
 def test_jump_url():
     assert jump_url(msg(5, "x")) == "https://discord.com/channels/100/201/5"
+
+
+# --- Task 9: LLM streaming and Wikipedia -------------------------------------
+
+import json
+import socket
+
+import pytest
+from aiohttp import ClientSession, web
+
+from askbot import (SYSTEM_PROMPT, LlmError, build_messages, image_part, parse_sse, pick_passages,
+                    progress_percent, stream_answer)
+
+
+def test_parse_sse():
+    line = "data: " + json.dumps({"choices": [{"delta": {"content": "あ"}}]})
+    assert parse_sse(line) == {"choices": [{"delta": {"content": "あ"}}]}
+    assert parse_sse("data: [DONE]") is None
+    assert parse_sse("") is None
+
+
+def test_progress_percent():
+    assert progress_percent({"total": 1000, "cache": 200, "processed": 600}) == 50
+
+
+def test_build_messages_with_wiki():
+    msgs = build_messages("いつ伝わった？", wiki=("ラーメン", "https://ja.wikipedia.org/wiki/x", "明治時代に伝わった。"))
+    assert msgs[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    user = msgs[-1]["content"]
+    assert "ラーメン" in user and "明治時代に伝わった。" in user
+    assert user.endswith("いつ伝わった？")
+
+
+def test_build_messages_with_reply_and_image():
+    img = image_part(b"abc", "image/png")
+    assert img == {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}}
+    msgs = build_messages("これ何？", reply_text="見て！", images=[img])
+    content = msgs[-1]["content"]
+    assert content[0] == img
+    assert "見て！" in content[-1]["text"] and content[-1]["text"].endswith("これ何？")
+
+
+def test_build_messages_with_history():
+    rows = [msg(1, "ラーメン屋は駅前", day=20)]
+    user = build_messages("どこだっけ？", history=rows)[-1]["content"]
+    assert "ラーメン屋は駅前" in user and "taro" in user
+
+
+def test_pick_passages_keeps_lead_and_hits():
+    text = "\n".join(["冒頭の段落。", "関係ない段落" + "あ" * 40, "江戸時代に伝わった。"])
+    picked = pick_passages(text, ["江戸"], max_chars=30)
+    assert "冒頭の段落。" in picked and "江戸時代に伝わった。" in picked
+    assert "関係ない" not in picked
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+async def start_app(port, handler):
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    return runner
+
+
+def sse_handler(seen):
+    async def handler(request):
+        seen.append(request.headers.get("Authorization"))
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        events = [
+            {"choices": [], "prompt_progress": {"total": 100, "cache": 0, "processed": 50}},
+            {"choices": [], "prompt_progress": {"total": 100, "cache": 0, "processed": 100}},
+            {"choices": [{"delta": {"content": "こん"}}]},
+            {"choices": [{"delta": {"content": "にちは"}}]},
+        ]
+        for e in events:
+            await resp.write(("data: " + json.dumps(e) + "\n\n").encode())
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    return handler
+
+
+def collect():
+    progress, text = [], []
+
+    async def on_progress(p):
+        progress.append(p)
+
+    async def on_text(t):
+        text.append(t)
+
+    return progress, text, on_progress, on_text
+
+
+def test_stream_answer_streams():
+    async def run():
+        port, seen = free_port(), []
+        runner = await start_app(port, sse_handler(seen))
+        progress, text, on_progress, on_text = collect()
+        async with ClientSession() as s:
+            await stream_answer(s, f"http://127.0.0.1:{port}", [], on_progress, on_text, api_key="k")
+        await runner.cleanup()
+        assert progress == [50, 100]
+        assert "".join(text) == "こんにちは"
+        assert seen == ["Bearer k"]
+
+    asyncio.run(run())
+
+
+def test_stream_answer_waits_for_server():
+    async def run():
+        port, seen = free_port(), []
+
+        async def late_start():
+            await asyncio.sleep(3)
+            return await start_app(port, sse_handler(seen))
+
+        starter = asyncio.create_task(late_start())
+        progress, text, on_progress, on_text = collect()
+        async with ClientSession() as s:
+            await stream_answer(s, f"http://127.0.0.1:{port}", [], on_progress, on_text, wait_seconds=10)
+        await (await starter).cleanup()
+        assert -1 in progress
+        assert "".join(text) == "こんにちは"
+
+    asyncio.run(run())
+
+
+def test_stream_answer_context_error():
+    async def handler(request):
+        body = {"error": {"message": "the request exceeds the available context size, try increasing it"}}
+        return web.json_response(body, status=400)
+
+    async def run():
+        port = free_port()
+        runner = await start_app(port, handler)
+        _, _, on_progress, on_text = collect()
+        try:
+            async with ClientSession() as s:
+                with pytest.raises(LlmError) as e:
+                    await stream_answer(s, f"http://127.0.0.1:{port}", [], on_progress, on_text)
+        finally:
+            await runner.cleanup()
+        assert str(e.value).startswith("写真や資料が大きすぎて読み切れませんでした")
+
+    asyncio.run(run())

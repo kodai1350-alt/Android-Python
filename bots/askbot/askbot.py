@@ -6,13 +6,18 @@ Run it in Python Runner. It needs:
   - LLM_API_KEY  set by the app together with LLM_URL
 """
 import asyncio
+import base64
+import json
 import logging
 import re
 import sqlite3
 import time
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+
+import aiohttp
 
 log = logging.getLogger("askbot")
 
@@ -364,3 +369,166 @@ class HistoryStore:
             Stored(r[0], r[1], r[2], r[3], r[4], datetime.fromtimestamp(r[5], timezone.utc))
             for r in rows
         ]
+
+
+# --- LLM: llama-server on this phone -----------------------------------------
+
+# First in every request, unchanged, so llama-server can reuse its cached reading of it.
+SYSTEM_PROMPT = (
+    "あなたはDiscordサーバーの質問に答えるアシスタントです。日本語で、分かりやすく、親切に答えてください。"
+    "資料が渡されたときは、資料に書かれていることだけを使って答えてください。"
+    "資料に書かれていないことは「資料には書かれていません」と言ってください。"
+    "分からないことを作り話で答えてはいけません。分からないときは、分からないと言ってください。"
+)
+
+MAX_ANSWER_TOKENS = 1500
+_CONTEXT_MESSAGE = "写真や資料が大きすぎて読み切れませんでした。写真を減らすか、質問を短くしてください。"
+_UNREACHABLE_MESSAGE = (
+    "AIモデルにつながりません。アプリの「5. AIモデル」が準備完了になっているか確かめて、Botを起動し直してください。"
+)
+
+
+class LlmError(Exception):
+    """An error whose message is shown to the person who asked, as is."""
+
+
+class _NotReady(Exception):
+    pass
+
+
+def parse_sse(line):
+    line = line.strip()
+    if not line.startswith("data: ") or line == "data: [DONE]":
+        return None
+    return json.loads(line[6:])
+
+
+def progress_percent(p):
+    done = p.get("processed", 0) - p.get("cache", 0)
+    total = p.get("total", 0) - p.get("cache", 0)
+    return round(100 * done / max(1, total))
+
+
+def image_part(data, content_type):
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{encoded}"}}
+
+
+def _history_lines(rows):
+    lines = []
+    for r in sorted(rows, key=lambda r: r.created_at):
+        when = r.created_at.astimezone(JST).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"[{when} {r.author}] {r.content}")
+    return "\n".join(lines)
+
+
+def build_messages(question, *, reply_text=None, images=(), wiki=None, history=None):
+    parts = []
+    if wiki:
+        title, _, text = wiki
+        parts.append(f"資料（Wikipedia「{title}」）:\n{text}")
+    if history is not None:
+        parts.append("資料（このサーバーの前の会話）:\n" + (_history_lines(history) or "（見つかりませんでした）"))
+    if reply_text:
+        parts.append(f"返信先のメッセージ:\n{reply_text}")
+    parts.append(f"質問: {question}")
+    text = "\n\n".join(parts)
+    content = [*images, {"type": "text", "text": text}] if images else text
+    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
+
+
+async def stream_answer(session, base_url, messages, on_progress, on_text, *, api_key=None, wait_seconds=120):
+    """Streams one answer. While llama-server is (re)starting it retries every 2 seconds,
+    calling on_progress(-1), for up to wait_seconds."""
+    body = {
+        "messages": messages, "stream": True, "return_progress": True, "max_tokens": MAX_ANSWER_TOKENS,
+        "temperature": 0.1, "top_k": 50, "top_p": 1.0, "min_p": 0.0, "repeat_penalty": 1.1,
+    }
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=900)
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        started = False
+        try:
+            async with session.post(base_url + "/v1/chat/completions", json=body, headers=headers,
+                                    timeout=timeout) as r:
+                if r.status == 503:
+                    raise _NotReady()
+                if r.status >= 400:
+                    detail = await r.text()
+                    if "context" in detail:
+                        raise LlmError(_CONTEXT_MESSAGE)
+                    raise LlmError(f"AIモデルがエラーを返しました（{r.status}）")
+                async for raw in r.content:
+                    event = parse_sse(raw.decode("utf-8", "replace"))
+                    if not event:
+                        continue
+                    started = True
+                    if "prompt_progress" in event:
+                        await on_progress(progress_percent(event["prompt_progress"]))
+                    for choice in event.get("choices") or []:
+                        piece = (choice.get("delta") or {}).get("content")
+                        if piece:
+                            await on_text(piece)
+                return
+        except (aiohttp.ClientConnectionError, _NotReady):
+            if started:
+                raise LlmError("答えている途中でAIモデルが止まりました。もう一度聞いてください。")
+            if time.monotonic() >= deadline:
+                raise LlmError(_UNREACHABLE_MESSAGE)
+            await on_progress(-1)
+            await asyncio.sleep(2)
+
+
+# --- Wikipedia (free, no sign-up) --------------------------------------------
+
+WIKI_API = "https://ja.wikipedia.org/w/api.php"
+WIKI_MAX_CHARS = 3000
+USER_AGENT = "PythonRunner-askbot/1.0 (https://github.com/kodai1350-alt/Android-Python)"
+
+
+def pick_passages(text, keywords, max_chars=WIKI_MAX_CHARS):
+    """The lead paragraph, then paragraphs mentioning a keyword, then the rest, in the article's
+    order, up to max_chars. Detail first: the whole budget is used when the article has it."""
+    paragraphs = [p.strip() for p in text.split("\n") if p.strip() and not p.strip().startswith("==")]
+    if not paragraphs:
+        return ""
+    chosen = {0}
+    used = len(paragraphs[0])
+    hits = [i for i, p in enumerate(paragraphs) if i and any(k in p for k in keywords)]
+    rest = [i for i in range(1, len(paragraphs)) if i not in hits]
+    for i in hits + rest:
+        if used + len(paragraphs[i]) > max_chars:
+            continue
+        chosen.add(i)
+        used += len(paragraphs[i])
+    return "\n".join(paragraphs[i] for i in sorted(chosen))
+
+
+async def _wiki_query(session, params):
+    """The API's "query" part; one retry when Wikipedia answers with an error (e.g. rate limits)."""
+    params = {**params, "action": "query", "format": "json", "formatversion": 2}
+    for attempt in range(2):
+        async with session.get(WIKI_API, params=params, headers={"User-Agent": USER_AGENT}) as r:
+            data = await r.json(content_type=None)
+        if "query" in data:
+            return data["query"]
+        log.warning("Wikipedia answered without results: %s", data.get("error", data))
+        await asyncio.sleep(1)
+    return None
+
+
+async def wiki_lookup(session, keywords):
+    """(title, url, passages) of the best-matching Japanese Wikipedia article, or None."""
+    try:
+        found = await _wiki_query(session, {"list": "search", "srsearch": " ".join(keywords), "srlimit": 1})
+        if not found or not found.get("search"):
+            return None
+        title = found["search"][0]["title"]
+        pages = await _wiki_query(session, {"prop": "extracts", "explaintext": 1, "redirects": 1, "titles": title})
+        text = pages["pages"][0].get("extract", "") if pages else ""
+    except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, IndexError, ValueError):
+        log.exception("Wikipedia lookup failed")
+        return None
+    url = "https://ja.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+    return title, url, pick_passages(text, keywords)
