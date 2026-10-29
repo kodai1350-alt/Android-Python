@@ -73,8 +73,9 @@ object BotController {
                 _llmState.value = LlmState.Ready
             } catch (e: ModelDownloader.Cancelled) {
                 _llmState.value = LlmState.Missing
-            } catch (e: Exception) {
-                _llmState.value = LlmState.Failed("ダウンロードに失敗しました: ${e.message}")
+            } catch (e: Throwable) {
+                // Errors too (e.g. a method missing on an old Android): show them instead of crashing the app.
+                _llmState.value = LlmState.Failed("ダウンロードに失敗しました: ${e.message ?: e.javaClass.simpleName}")
             } finally {
                 downloading.set(false)
             }

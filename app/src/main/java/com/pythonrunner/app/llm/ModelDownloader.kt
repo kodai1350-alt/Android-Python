@@ -3,6 +3,7 @@ package com.pythonrunner.app.llm
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.security.MessageDigest
@@ -87,7 +88,7 @@ class ModelDownloader(
                     val buf = ByteArray(chunkBytes)
                     while (true) {
                         if (isCancelled()) throw Cancelled()
-                        val n = input.readNBytes(buf, 0, buf.size)
+                        val n = readChunk(input, buf)
                         if (n <= 0) break
                         out.write(buf, 0, n)
                         digest.update(buf, 0, n)
@@ -100,6 +101,20 @@ class ModelDownloader(
             conn.disconnect()
         }
         finish(f, part, have, digest)
+    }
+
+    /**
+     * Fills [buf] unless the stream ends first; returns the bytes read (0 at the end).
+     * InputStream.readNBytes would do this but needs Android 13 (API 33); minSdk is 26.
+     */
+    private fun readChunk(input: InputStream, buf: ByteArray): Int {
+        var filled = 0
+        while (filled < buf.size) {
+            val n = input.read(buf, filled, buf.size - filled)
+            if (n < 0) break
+            filled += n
+        }
+        return filled
     }
 
     private fun finish(f: ModelFile, part: File, have: Long, digest: MessageDigest) {

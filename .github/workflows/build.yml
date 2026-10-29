@@ -25,6 +25,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6  # v6.4.0
       - name: Unit tests and debug APK
         run: ./gradlew testDebugUnitTest assembleDebug --console=plain
+      # Unit tests run on desktop Java; lint is what catches calls missing on Android 8 (minSdk 26).
+      - name: Lint (API level checks)
+        run: ./gradlew lintDebug --console=plain
       - name: askbot tests
         run: |
           python3 -m venv .venv
