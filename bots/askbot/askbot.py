@@ -5,7 +5,11 @@ Run it in Python Runner. It needs:
   - LLM_URL      set by the app while the AI model is downloaded
   - LLM_API_KEY  set by the app together with LLM_URL
 """
+import asyncio
+import logging
 import time
+
+log = logging.getLogger("askbot")
 
 # --- Replies: splitting and throttled edits ---------------------------------
 
@@ -84,3 +88,52 @@ class ReplyWriter:
                 self._messages.append(await self._send_more(part))
                 self._shown.append(part)
         self._last_edit = now
+
+
+# --- Queue: one question at a time -----------------------------------------
+
+class AskQueue:
+    """Runs one question at a time, in order; each person may have only one question queued.
+
+    The phone reads only one prompt at a time (reading stalls everything else), so answers are
+    never interleaved and never cut short for the next person.
+    """
+
+    def __init__(self):
+        self._waiting = []
+        self._running_user = None
+        self._wake = asyncio.Event()
+
+    def busy_users(self):
+        users = {user for user, _, _ in self._waiting}
+        if self._running_user is not None:
+            users.add(self._running_user)
+        return users
+
+    def submit(self, user_id, job, on_position):
+        """Returns the place in line (0 = starts now), or None if this person already has a question."""
+        if user_id in self.busy_users():
+            return None
+        self._waiting.append((user_id, job, on_position))
+        self._wake.set()
+        return len(self._waiting) - (0 if self._running_user is not None else 1)
+
+    async def run_forever(self):
+        while True:
+            if not self._waiting:
+                self._wake.clear()
+                await self._wake.wait()
+                continue
+            user, job, _ = self._waiting.pop(0)
+            self._running_user = user
+            for i, (_, _, on_position) in enumerate(self._waiting):
+                try:
+                    await on_position(i + 1)
+                except Exception:
+                    log.exception("could not update a waiting message")
+            try:
+                await job()
+            except Exception:
+                log.exception("question failed")
+            finally:
+                self._running_user = None

@@ -94,3 +94,101 @@ def test_reply_writer_status_until_text():
         assert first.content == "答え"
 
     asyncio.run(run())
+
+
+# --- Task 6: one-at-a-time queue --------------------------------------------
+
+def _queue_harness():
+    q = askbot.AskQueue()
+    log = []
+    positions = {}
+    gates = {}
+
+    def make(name):
+        gates[name] = asyncio.Event()
+
+        async def job():
+            log.append(("start", name))
+            await gates[name].wait()
+            log.append(("end", name))
+
+        async def on_position(n):
+            positions.setdefault(name, []).append(n)
+
+        return job, on_position
+
+    return q, log, positions, gates, make
+
+
+def test_jobs_run_one_at_a_time_in_order():
+    async def run():
+        q, log, _, gates, make = _queue_harness()
+        worker = asyncio.create_task(q.run_forever())
+        for user, name in [(1, "A"), (2, "B"), (3, "C")]:
+            q.submit(user, *make(name))
+        for name in "ABC":
+            await asyncio.sleep(0.01)
+            gates[name].set()
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        assert log == [("start", "A"), ("end", "A"), ("start", "B"), ("end", "B"), ("start", "C"), ("end", "C")]
+
+    asyncio.run(run())
+
+
+def test_positions_update():
+    async def run():
+        q, _, positions, gates, make = _queue_harness()
+        worker = asyncio.create_task(q.run_forever())
+        assert q.submit(1, *make("A")) == 0
+        await asyncio.sleep(0.01)
+        assert q.submit(2, *make("B")) == 1
+        assert q.submit(3, *make("C")) == 2
+        gates["A"].set()
+        await asyncio.sleep(0.02)
+        assert positions["C"] == [1]
+        worker.cancel()
+
+    asyncio.run(run())
+
+
+def test_same_user_rejected_while_waiting():
+    async def run():
+        q, _, _, gates, make = _queue_harness()
+        worker = asyncio.create_task(q.run_forever())
+        assert q.submit(1, *make("A")) == 0
+        await asyncio.sleep(0.01)
+        assert q.submit(2, *make("B")) == 1
+        assert q.submit(2, *make("B2")) is None
+        assert q.busy_users() == {1, 2}
+        gates["A"].set()
+        gates["B"].set()
+        await asyncio.sleep(0.02)
+        assert q.submit(2, *make("B3")) == 0
+        worker.cancel()
+
+    asyncio.run(run())
+
+
+def test_failed_job_does_not_stop_queue():
+    async def run():
+        q = askbot.AskQueue()
+        done = []
+
+        async def boom():
+            raise RuntimeError("x")
+
+        async def ok():
+            done.append(True)
+
+        async def pos(n):
+            pass
+
+        worker = asyncio.create_task(q.run_forever())
+        q.submit(1, boom, pos)
+        q.submit(2, ok, pos)
+        await asyncio.sleep(0.05)
+        worker.cancel()
+        assert done == [True]
+
+    asyncio.run(run())
