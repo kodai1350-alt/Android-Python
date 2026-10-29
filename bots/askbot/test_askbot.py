@@ -192,3 +192,57 @@ def test_failed_job_does_not_stop_queue():
         assert done == [True]
 
     asyncio.run(run())
+
+
+# --- Task 7: question routing, keywords and dates ---------------------------
+
+from datetime import datetime
+
+from askbot import JST, plan_question
+
+NOW = datetime(2026, 10, 29, 12, 0, tzinfo=JST)
+
+
+def jst(y, m, d):
+    return datetime(y, m, d, tzinfo=JST)
+
+
+def test_plan_history_with_date():
+    p = plan_question("10月20日に話してたゲームの名前なんだっけ？", False, NOW)
+    assert p.mode == "history"
+    assert p.keywords == ["ゲーム"]
+    assert (p.since, p.until) == (jst(2026, 10, 20), jst(2026, 10, 21))
+
+
+def test_plan_last_week():
+    p = plan_question("先週ラーメン屋の話したけど、どこだっけ？", False, NOW)
+    assert p.mode == "history"
+    assert p.keywords == ["ラーメン"]
+    assert (p.since, p.until) == (jst(2026, 10, 19), jst(2026, 10, 26))
+
+
+def test_plan_wiki():
+    p = plan_question("量子コンピュータって何？", False, NOW)
+    assert p.mode == "wiki"
+    assert p.keywords == ["量子", "コンピュータ"]
+    assert (p.since, p.until) == (None, None)
+
+
+def test_plan_photo():
+    assert plan_question("これ何？", True, NOW).mode == "photo"
+
+
+def test_plan_chat():
+    p = plan_question("こんにちは", False, NOW)
+    assert p.mode == "chat"
+    assert p.keywords == []
+
+
+def test_future_date_means_last_year():
+    p = plan_question("12月3日", False, NOW)
+    assert p.since == jst(2025, 12, 3)
+
+
+def test_yesterday():
+    p = plan_question("昨日", False, NOW)
+    assert (p.since, p.until) == (jst(2026, 10, 28), jst(2026, 10, 29))
