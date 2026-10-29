@@ -299,6 +299,8 @@ class HistoryStore:
     """Messages of registered channels, kept in step with Discord (edits and deletes)."""
 
     def __init__(self, path):
+        # Python Runner sets HOME to a folder it does not create.
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.executescript(_SCHEMA)
 

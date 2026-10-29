@@ -792,3 +792,10 @@ def test_upsert_ignores_unregistered_channel(tmp_path):
     s.unregister(G, C2)
     s.upsert(msg(1, "ラーメン", channel=C2))
     assert s.search(G, {C2}, ["ラーメン"], None, None) == []
+
+
+def test_history_store_creates_missing_folder(tmp_path):
+    # The app sets HOME to a folder it does not create; the database must still open.
+    s = HistoryStore(str(tmp_path / "home" / "askbot-history.db"))
+    s.register(G, C1)
+    assert s.registered(G) == {C1}

@@ -32,6 +32,8 @@ class PythonRuntime(
     /** Extracts into a temporary directory and writes the marker last, so an interrupted run is redone. */
     @Synchronized
     fun ensureInstalled() {
+        // HOME is handed to every script (see environment); make sure it exists.
+        File(baseDir, "home").mkdirs()
         if (isInstalled()) return
         val staging = File(baseDir, "python.tmp")
         staging.deleteRecursively()

@@ -90,6 +90,15 @@ class PythonRuntimeTest {
         assertFalse(runtime(version = "3.14.9-2").isPipInstalled())
     }
 
+    @Test fun ensureInstalledCreatesHome() {
+        val rt = runtime()
+        rt.ensureInstalled()
+        File(baseDir, "home").deleteRecursively()
+        // Already installed: HOME must still exist afterwards, scripts write there.
+        rt.ensureInstalled()
+        assertTrue(File(baseDir, "home").isDirectory)
+    }
+
     @Test fun environmentHasRequiredVariables() {
         val rt = runtime()
         val env = rt.environment(listOf(File("/x/libs")), mapOf("TOKEN" to "abc", "PYTHONHOME" to "evil"))
