@@ -785,3 +785,10 @@ def test_only_oversized_photo_is_refused(tmp_path, monkeypatch):
     sent, busy = asyncio.run(run())
     assert "写真が大きすぎます（8MBまで）" in sent[0].content
     assert busy == set()
+
+
+def test_upsert_ignores_unregistered_channel(tmp_path):
+    s = store_with(tmp_path)
+    s.unregister(G, C2)
+    s.upsert(msg(1, "ラーメン", channel=C2))
+    assert s.search(G, {C2}, ["ラーメン"], None, None) == []

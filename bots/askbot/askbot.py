@@ -319,11 +319,14 @@ class HistoryStore:
         return self._db.execute("SELECT 1 FROM channels WHERE channel_id = ?", (channel_id,)).fetchone() is not None
 
     def upsert(self, s):
+        """Stores or updates a message, but only while its channel is registered (checked in the same
+        statement, so a message cannot slip in after /記録やめる)."""
         with self._db:
             self._db.execute(
-                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
-                "author = excluded.author, content = excluded.content",
-                (s.message_id, s.guild_id, s.channel_id, s.author, s.content, s.created_at.timestamp()),
+                "INSERT INTO messages SELECT ?, ?, ?, ?, ?, ? "
+                "WHERE EXISTS (SELECT 1 FROM channels WHERE channel_id = ?) "
+                "ON CONFLICT(message_id) DO UPDATE SET author = excluded.author, content = excluded.content",
+                (s.message_id, s.guild_id, s.channel_id, s.author, s.content, s.created_at.timestamp(), s.channel_id),
             )
 
     def delete(self, message_id):
