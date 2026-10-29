@@ -481,3 +481,74 @@ def test_stream_answer_context_error():
         assert str(e.value).startswith("写真や資料が大きすぎて読み切れませんでした")
 
     asyncio.run(run())
+
+
+# --- Task 10: Discord glue ---------------------------------------------------
+
+from types import SimpleNamespace
+
+from askbot import Plan, collect_images, readable_channels, sources_footer
+
+
+class FakeChannel:
+    def __init__(self, view, history):
+        self._perms = SimpleNamespace(view_channel=view, read_message_history=history)
+
+    def permissions_for(self, member):
+        return self._perms
+
+
+def test_readable_channels_respects_permissions():
+    channels = {1: FakeChannel(True, True), 2: FakeChannel(False, True), 3: FakeChannel(True, False)}
+    guild = SimpleNamespace(get_channel=channels.get)
+    assert readable_channels(guild, object(), {1, 2, 3, 4}) == {1}
+
+
+class FakeAttachment:
+    def __init__(self, size, content_type="image/jpeg"):
+        self.size = size
+        self.content_type = content_type
+
+    async def read(self):
+        return b"img"
+
+
+def test_too_large_image_rejected():
+    m = SimpleNamespace(attachments=[FakeAttachment(9 * 1024 * 1024)])
+    parts, reason = asyncio.run(collect_images([m]))
+    assert parts == []
+    assert "写真が大きすぎます（8MBまで）" in reason
+
+
+def test_only_two_images():
+    m = SimpleNamespace(attachments=[FakeAttachment(10) for _ in range(3)])
+    parts, reason = asyncio.run(collect_images([m]))
+    assert len(parts) == 2
+    assert "最初の2枚だけ見ます" in reason
+
+
+def test_non_images_ignored():
+    m = SimpleNamespace(attachments=[FakeAttachment(10, "text/plain")])
+    assert asyncio.run(collect_images([m])) == ([], None)
+
+
+def test_sources_footer():
+    wiki = ("ラーメン", "https://ja.wikipedia.org/wiki/x", "…")
+    assert sources_footer(Plan("wiki"), wiki, None) == "📚 参考: <https://ja.wikipedia.org/wiki/x>"
+    rows = [msg(i, "a") for i in range(7)]
+    footer = sources_footer(Plan("history"), None, rows)
+    assert footer.count("🔗 <https://discord.com/channels/") == 5
+    assert sources_footer(Plan("chat"), None, None) == ""
+
+
+def test_commands_registered(tmp_path, monkeypatch):
+    monkeypatch.setattr(askbot, "DB_PATH", str(tmp_path / "h.db"))
+
+    async def run():
+        bot = askbot.AskBot()
+        bot._add_commands()
+        names = sorted(c.name for c in bot.tree.get_commands())
+        await bot.close()
+        return names
+
+    assert asyncio.run(run()) == ["記録する", "記録やめる"]

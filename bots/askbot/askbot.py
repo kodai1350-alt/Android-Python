@@ -9,8 +9,10 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import sqlite3
+import sys
 import time
 import unicodedata
 import urllib.parse
@@ -18,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+import discord
+from discord import app_commands
 
 log = logging.getLogger("askbot")
 
@@ -532,3 +536,255 @@ async def wiki_lookup(session, keywords):
         return None
     url = "https://ja.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
     return title, url, pick_passages(text, keywords)
+
+
+# --- Discord ------------------------------------------------------------------
+
+MAX_IMAGES = 2
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+BACKFILL_DAYS = 365
+DB_PATH = os.path.join(os.environ.get("HOME") or ".", "askbot-history.db")
+
+HELP_TEXT = (
+    "メンションして質問してね。たとえば:\n"
+    "・写真に返信して「@ぼく これ何？」\n"
+    "・「@ぼく 量子コンピュータって何？」（Wikipediaで調べて答えます）\n"
+    "・「@ぼく 先週ラーメン屋の話したけど、どこだっけ？」（前の会話を探します）\n"
+    "前の会話を探せるようにするには、そのチャンネルで /記録する を実行してください。"
+)
+NO_MODEL_TEXT = "AIモデルが準備できていません（アプリの「5. AIモデル」でダウンロードしてから、Botを起動し直してください）"
+
+
+def readable_channels(guild, member, registered):
+    """Registered channels the asker may read: answers never quote a channel they cannot see."""
+    readable = set()
+    for channel_id in registered:
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            continue
+        perms = channel.permissions_for(member)
+        if perms.view_channel and perms.read_message_history:
+            readable.add(channel_id)
+    return readable
+
+
+async def collect_images(messages):
+    """Image parts from the messages' attachments (at most MAX_IMAGES), and why any were skipped."""
+    parts, reasons = [], []
+    for m in messages:
+        for a in m.attachments:
+            content_type = (a.content_type or "").split(";")[0]
+            if not content_type.startswith("image/"):
+                continue
+            if a.size > MAX_IMAGE_BYTES:
+                reasons.append("写真が大きすぎます（8MBまで）")
+            elif len(parts) >= MAX_IMAGES:
+                reasons.append(f"写真は最初の{MAX_IMAGES}枚だけ見ます")
+            else:
+                parts.append(image_part(await a.read(), content_type))
+    reasons = list(dict.fromkeys(reasons))
+    return parts, ("・".join(reasons) if reasons else None)
+
+
+def sources_footer(plan, wiki, rows):
+    if plan.mode == "wiki" and wiki:
+        return f"📚 参考: <{wiki[1]}>"
+    if plan.mode == "history" and rows:
+        return "\n".join(f"🔗 <{jump_url(r)}>" for r in rows[:5])
+    return ""
+
+
+def _to_stored(message):
+    return Stored(message.id, message.guild.id, message.channel.id, message.author.display_name,
+                  message.clean_content, message.created_at)
+
+
+class AskBot(discord.Client):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self.queue = AskQueue()
+        self.store = HistoryStore(DB_PATH)
+        self.llm_url = os.environ.get("LLM_URL")
+        self.llm_key = os.environ.get("LLM_API_KEY")
+        self.session = None
+        self._tasks = set()
+
+    def _spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def setup_hook(self):
+        self.session = aiohttp.ClientSession()
+        self._spawn(self.queue.run_forever())
+        self._add_commands()
+        await self.tree.sync()
+
+    async def close(self):
+        if self.session:
+            await self.session.close()
+        await super().close()
+
+    async def on_ready(self):
+        log.info("logged in as %s (LLM: %s)", self.user, "ready" if self.llm_url else "missing")
+        # Catch up on messages posted while the bot was offline.
+        for guild in self.guilds:
+            for channel_id in self.store.registered(guild.id):
+                channel = guild.get_channel(channel_id)
+                if channel is not None:
+                    self._spawn(self.backfill(channel, announce=False))
+
+    # --- recording ---
+
+    def _add_commands(self):
+        @app_commands.command(name="記録する", description="このチャンネルの会話を記録して、あとで探せるようにします")
+        @app_commands.guild_only()
+        @app_commands.default_permissions(manage_channels=True)
+        async def record(interaction: discord.Interaction):
+            self.store.register(interaction.guild_id, interaction.channel_id)
+            await interaction.response.send_message(
+                f"記録を始めました。過去{BACKFILL_DAYS}日分を読み込みます（少し時間がかかります）。")
+            self._spawn(self.backfill(interaction.channel, announce=True))
+
+        @app_commands.command(name="記録やめる", description="このチャンネルの記録をやめて、保存した分を消します")
+        @app_commands.guild_only()
+        @app_commands.default_permissions(manage_channels=True)
+        async def stop_recording(interaction: discord.Interaction):
+            self.store.unregister(interaction.guild_id, interaction.channel_id)
+            await interaction.response.send_message("記録をやめて、保存していた分を消しました。")
+
+        self.tree.add_command(record)
+        self.tree.add_command(stop_recording)
+
+    async def backfill(self, channel, announce):
+        since = self.store.latest(channel.id) or datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
+        count = 0
+        try:
+            async for m in channel.history(limit=None, after=since, oldest_first=True):
+                if not self.store.is_registered(channel.id):
+                    return
+                if not m.author.bot:
+                    self.store.upsert(_to_stored(m))
+                    count += 1
+        except discord.Forbidden:
+            if announce:
+                await channel.send("このチャンネルの履歴を読む権限がありません（「メッセージ履歴を読む」を許可してください）。")
+            return
+        if announce:
+            await channel.send(f"📚 過去の会話を{count}件読み込みました。")
+
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+        if message.guild and self.store.is_registered(message.channel.id):
+            self.store.upsert(_to_stored(message))
+        if self.user in message.mentions:
+            await self.handle_question(message)
+
+    async def on_raw_message_edit(self, payload):
+        m = getattr(payload, "message", None)
+        if m is not None and m.guild and not m.author.bot and self.store.is_registered(m.channel.id):
+            self.store.upsert(_to_stored(m))
+
+    async def on_raw_message_delete(self, payload):
+        self.store.delete(payload.message_id)
+
+    async def on_raw_bulk_message_delete(self, payload):
+        for message_id in payload.message_ids:
+            self.store.delete(message_id)
+
+    # --- questions ---
+
+    async def handle_question(self, message):
+        text = message.content
+        for mention in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
+            text = text.replace(mention, "")
+        text = text.strip()
+        reply_to = None
+        if message.reference and message.reference.message_id:
+            reply_to = message.reference.resolved
+            if not isinstance(reply_to, discord.Message):
+                try:
+                    reply_to = await message.channel.fetch_message(message.reference.message_id)
+                except discord.HTTPException:
+                    reply_to = None
+        images, image_note = await collect_images([message] + ([reply_to] if reply_to else []))
+        if not text and not images and reply_to is None:
+            await message.reply(HELP_TEXT, mention_author=False)
+            return
+        question = text or "これについて教えて"
+        plan = plan_question(question, bool(images), datetime.now(JST))
+
+        first = await message.reply("受け付けました", mention_author=False)
+        if not self.llm_url:
+            await first.edit(content=NO_MODEL_TEXT)
+            return
+        writer = ReplyWriter(first, message.channel.send)
+
+        async def job():
+            await self.answer(message, question, reply_to, images, image_note, plan, writer)
+
+        async def on_position(n):
+            await first.edit(content=f"順番待ち {n}番目です")
+
+        position = self.queue.submit(message.author.id, job, on_position)
+        if position is None:
+            await first.edit(content="前の質問が終わるまで待ってね")
+        elif position > 0:
+            await on_position(position)
+
+    async def answer(self, message, question, reply_to, images, image_note, plan, writer):
+        notes = [image_note] if image_note else []
+        wiki = rows = None
+        if plan.mode == "history":
+            await writer.status("🔎 前の会話を探しています…")
+            channels = set()
+            if message.guild:
+                registered = self.store.registered(message.guild.id)
+                channels = readable_channels(message.guild, message.author, registered)
+            if not channels:
+                await writer.append("このサーバーには、探せる記録がありません。探したいチャンネルで /記録する をしてください。")
+                await writer.finish()
+                return
+            rows = self.store.search(message.guild.id, channels, plan.keywords, plan.since, plan.until)
+            if not rows:
+                await writer.append("前の会話から見つかりませんでした。言葉や日付を変えて聞いてみてください。")
+                await writer.finish()
+                return
+        elif plan.mode == "wiki":
+            await writer.status("📖 Wikipediaで調べています…")
+            wiki = await wiki_lookup(self.session, plan.keywords)
+            if wiki is None:
+                notes.append("Wikipediaに記事が見つかりませんでした")
+
+        messages = build_messages(
+            question, reply_text=reply_to.clean_content if reply_to else None,
+            images=images, wiki=wiki, history=rows,
+        )
+        kind = plan.mode if plan.mode in ("photo", "history", "wiki") else "question"
+
+        async def on_progress(percent):
+            await writer.status("⏳ AIモデルを起動中…" if percent < 0 else progress_text(kind, percent))
+
+        try:
+            await stream_answer(self.session, self.llm_url, messages, on_progress, writer.append, api_key=self.llm_key)
+        except LlmError as e:
+            await writer.append(f"\n\n⚠ {e}")
+        footer = "\n".join(filter(None, [sources_footer(plan, wiki, rows), *(f"※ {n}" for n in notes)]))
+        await writer.finish(footer)
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    token = os.environ.get("TOKEN")
+    if not token:
+        print("TOKEN がありません。アプリの「4. 秘密の値」に TOKEN（Botのトークン）を入れて保存してください。", file=sys.stderr)
+        sys.exit(1)
+    AskBot().run(token, log_handler=None)
+
+
+if __name__ == "__main__":
+    main()
