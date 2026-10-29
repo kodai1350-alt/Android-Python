@@ -246,3 +246,85 @@ def test_future_date_means_last_year():
 def test_yesterday():
     p = plan_question("昨日", False, NOW)
     assert (p.since, p.until) == (jst(2026, 10, 28), jst(2026, 10, 29))
+
+
+# --- Task 8: message history -------------------------------------------------
+
+from datetime import timezone as _tz
+
+from askbot import HistoryStore, Stored, jump_url
+
+G, C1, C2 = 100, 201, 202
+
+
+def msg(mid, content, day=20, channel=C1, guild=G):
+    return Stored(mid, guild, channel, "taro", content, datetime(2026, 10, day, 3, 0, tzinfo=_tz.utc))
+
+
+def store_with(tmp_path, *rows):
+    s = HistoryStore(str(tmp_path / "h.db"))
+    s.register(G, C1)
+    s.register(G, C2)
+    for r in rows:
+        s.upsert(r)
+    return s
+
+
+def test_search_by_keyword(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン屋に行った"), msg(2, "今日は雨"))
+    assert [r.message_id for r in s.search(G, {C1}, ["ラーメン"], None, None)] == [1]
+
+
+def test_search_short_keyword(tmp_path):
+    s = store_with(tmp_path, msg(1, "名前は太郎"), msg(2, "雨"))
+    assert [r.message_id for r in s.search(G, {C1}, ["名前"], None, None)] == [1]
+
+
+def test_search_filters_channels_and_guild(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン"), msg(2, "ラーメン", channel=C2), msg(3, "ラーメン", guild=999))
+    assert [r.message_id for r in s.search(G, {C1}, ["ラーメン"], None, None)] == [1]
+    assert s.search(G, set(), ["ラーメン"], None, None) == []
+
+
+def test_search_date_range(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン", day=19), msg(2, "ラーメン", day=20), msg(3, "ラーメン", day=21))
+    since = datetime(2026, 10, 20, tzinfo=JST)
+    until = datetime(2026, 10, 21, tzinfo=JST)
+    assert [r.message_id for r in s.search(G, {C1}, ["ラーメン"], since, until)] == [2]
+
+
+def test_search_no_keywords_returns_latest_in_range(tmp_path):
+    s = store_with(tmp_path, msg(1, "a", day=19), msg(2, "b", day=20), msg(3, "c", day=21))
+    assert [r.message_id for r in s.search(G, {C1}, [], None, None, limit=2)] == [3, 2]
+
+
+def test_search_ranks_more_hits_first(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン", day=21), msg(2, "ラーメンとギョーザ", day=19))
+    assert [r.message_id for r in s.search(G, {C1}, ["ラーメン", "ギョーザ"], None, None)] == [2, 1]
+
+
+def test_edit_updates_search(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン"))
+    s.upsert(msg(1, "カレーライス"))
+    assert s.search(G, {C1}, ["ラーメン"], None, None) == []
+    assert [r.content for r in s.search(G, {C1}, ["カレー"], None, None)] == ["カレーライス"]
+
+
+def test_delete_and_unregister_remove_rows(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン"), msg(2, "ラーメン"), msg(3, "ラーメン", channel=C2))
+    s.delete(1)
+    assert sorted(r.message_id for r in s.search(G, {C1, C2}, ["ラーメン"], None, None)) == [2, 3]
+    s.unregister(G, C2)
+    assert not s.is_registered(C2)
+    assert s.registered(G) == {C1}
+    assert [r.message_id for r in s.search(G, {C1, C2}, ["ラーメン"], None, None)] == [2]
+
+
+def test_latest(tmp_path):
+    s = store_with(tmp_path, msg(1, "a", day=19), msg(2, "b", day=22))
+    assert s.latest(C1) == datetime(2026, 10, 22, 3, 0, tzinfo=_tz.utc)
+    assert s.latest(C2) is None
+
+
+def test_jump_url():
+    assert jump_url(msg(5, "x")) == "https://discord.com/channels/100/201/5"
