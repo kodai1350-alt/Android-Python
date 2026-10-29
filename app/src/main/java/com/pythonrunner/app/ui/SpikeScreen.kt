@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -55,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -72,6 +74,7 @@ import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
 import com.pythonrunner.app.service.BotController
+import com.pythonrunner.app.service.LlmState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -113,6 +116,18 @@ fun SpikeScreen() {
     }
     var savedSecrets by remember { mutableStateOf(store.envVars) }
     var justSaved by remember { mutableStateOf(false) }
+
+    val llmState by BotController.llmState.collectAsStateWithLifecycle()
+    var llmThreads by remember { mutableStateOf(store.llmThreads) }
+    var confirmDeleteModel by remember { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { BotController.refreshLlmState(context) }
+    // A 1.25GB download should not stop because the screen turned off.
+    val view = LocalView.current
+    val downloadingModel = llmState is LlmState.Downloading
+    DisposableEffect(downloadingModel) {
+        view.keepScreenOn = downloadingModel
+        onDispose { view.keepScreenOn = false }
+    }
 
     // Runs one Python command and streams its output into the work log.
     fun runWork(command: List<String>, then: (Int) -> Unit = {}) {
@@ -371,7 +386,62 @@ fun SpikeScreen() {
             }
         }
 
-        Section("5. 実行") {
+        Section("5. AIモデル（LLM）") {
+            Help("llm", uiPrefs) {
+                Text(
+                    "Discordで質問に答えるBot（askbot）が使うAIモデルです。" +
+                        "ダウンロードしておくと、Botを起動したときに一緒に動きます。" +
+                        "Botからは環境変数 LLM_URL で使えます。",
+                    fontSize = 13.sp, color = Color.DarkGray,
+                )
+            }
+            val botRunning = status == BotStatus.RUNNING || status == BotStatus.STARTING
+            when (val s = llmState) {
+                LlmState.Missing -> {
+                    WorkResultView(WorkResult.Idle("まだダウンロードしていません"))
+                    Button(onClick = { BotController.startModelDownload(context) }) { Text("ダウンロード（約1.25GB・Wi-Fi推奨）") }
+                }
+                is LlmState.Downloading -> {
+                    WorkResultView(WorkResult.Working("ダウンロード中 ${s.percent}%（この画面を開いたままにしてください）"))
+                    OutlinedButton(onClick = { BotController.cancelModelDownload() }) { Text("中止") }
+                }
+                LlmState.Ready -> {
+                    WorkResultView(WorkResult.Done("準備完了（Botを起動すると一緒に動きます）"))
+                    OutlinedButton(enabled = !botRunning, onClick = { confirmDeleteModel = true }) { Text("削除", color = Red) }
+                    if (botRunning) Text("削除するにはBotを停止してください", color = Gray, fontSize = 12.sp)
+                }
+                is LlmState.Failed -> {
+                    WorkResultView(WorkResult.Failed(s.message))
+                    Button(onClick = { BotController.startModelDownload(context) }) { Text("もう一度ダウンロード（続きから）") }
+                }
+            }
+            Text("使うCPUの数（次の起動から）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (n in listOf(2, 4, 6)) {
+                    if (n == llmThreads) {
+                        Button(onClick = {}) { Text("$n") }
+                    } else {
+                        OutlinedButton(onClick = { store.llmThreads = n; llmThreads = n }) { Text("$n") }
+                    }
+                }
+            }
+        }
+
+        if (confirmDeleteModel) {
+            AlertDialog(
+                onDismissRequest = { confirmDeleteModel = false },
+                title = { Text("AIモデルを削除しますか？") },
+                text = { Text("約1.25GBを空けます。使うときは、もう一度ダウンロードが必要です。") },
+                confirmButton = {
+                    TextButton(onClick = { BotController.deleteModel(context); confirmDeleteModel = false }) {
+                        Text("削除", color = Red)
+                    }
+                },
+                dismissButton = { TextButton(onClick = { confirmDeleteModel = false }) { Text("やめる") } },
+            )
+        }
+
+        Section("6. 実行") {
             StatusRow(status, startedAt)
             val running = status == BotStatus.RUNNING || status == BotStatus.STARTING
             if (running) {
@@ -419,11 +489,11 @@ fun SpikeScreen() {
             )
         }
 
-        Section("6. ログ") {
+        Section("7. ログ") {
             if (botLogs.isEmpty()) Text("まだログはありません", color = Gray) else LogView(botLogs, context)
         }
 
-        Section("7. 端末の設定（画面オフで動かすため）") {
+        Section("8. 端末の設定（画面オフで動かすため）") {
             val ignoring = remember(status) {
                 context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
             }

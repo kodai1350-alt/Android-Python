@@ -14,6 +14,8 @@ import androidx.core.app.ServiceCompat
 import com.pythonrunner.app.MainActivity
 import com.pythonrunner.app.bot.BotRunner
 import com.pythonrunner.app.bot.BotStatus
+import com.pythonrunner.app.llm.LlmServer
+import com.pythonrunner.app.llm.Supervisor
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.process.ManagedProcess
 import java.io.File
@@ -22,6 +24,9 @@ import kotlin.concurrent.thread
 /** Keeps the bot process alive with the screen off: foreground notification plus a partial wake lock. */
 class BotService : Service() {
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
+    private var llm: Supervisor? = null
+    // Shared by llama-server and the bot for this run of the service.
+    private val llmApiKey = LlmServer.newApiKey()
 
     private val runner by lazy {
         val store = BotController.store(this)
@@ -30,9 +35,15 @@ class BotService : Service() {
             prepare = { rt.ensureInstalled() },
             createProcess = { onLine, onExit ->
                 val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
+                // The bot finds the LLM through LLM_URL, set only when the model is on the phone.
+                val llm = if (BotController.models(this).isReady()) {
+                    mapOf("LLM_URL" to BotController.llmServer(this).url, "LLM_API_KEY" to llmApiKey)
+                } else {
+                    emptyMap()
+                }
                 ManagedProcess(
                     rt.command(File(store.botDir, main).path),
-                    rt.environment(listOf(store.libsDir), store.envVars),
+                    rt.environment(listOf(store.libsDir), store.envVars + llm),
                     store.botDir, onLine, onExit,
                 )
             },
@@ -73,6 +84,7 @@ class BotService : Service() {
     }
 
     override fun onDestroy() {
+        stopLlm()
         if (runner.isActive) thread(name = "bot-stop") { runner.stop() }
         releaseWakeLock()
         super.onDestroy()
@@ -84,10 +96,34 @@ class BotService : Service() {
         if (!runner.start()) return
         acquireWakeLock()
         BotController.store(this).wasRunning = true
+        startLlm()
+    }
+
+    /** Runs llama-server next to the bot while the model is on the phone. */
+    @Synchronized
+    private fun startLlm() {
+        if (llm != null) return
+        val models = BotController.models(this)
+        if (!models.isReady()) return
+        val server = BotController.llmServer(this)
+        val threads = BotController.store(this).llmThreads
+        BotController.appendLog(LogLine(System.currentTimeMillis(), "[AIモデル] 起動します（CPU ${threads}個）", false))
+        llm = Supervisor(
+            create = { onLine, onExit -> ManagedProcess(server.command(threads, llmApiKey), emptyMap(), models.dir, onLine, onExit) },
+            log = BotController::appendLog,
+        ).also { it.start() }
+    }
+
+    @Synchronized
+    private fun stopLlm() {
+        val supervisor = llm ?: return
+        llm = null
+        thread(name = "llm-stop") { supervisor.stop() }
     }
 
     private fun stopBot() {
         BotController.store(this).wasRunning = false
+        stopLlm()
         if (runner.isActive) {
             thread(name = "bot-stop") { runner.stop() }
         } else {
@@ -105,6 +141,7 @@ class BotService : Service() {
         thread(name = "bot-export") { runCatching { BotController.sync(this)?.export() } }
         // A new start may already be under way; leave its wake lock and service alone.
         if (runner.isActive) return
+        stopLlm()
         releaseWakeLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()

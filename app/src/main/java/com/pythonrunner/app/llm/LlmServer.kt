@@ -1,6 +1,7 @@
 package com.pythonrunner.app.llm
 
 import java.io.File
+import java.security.SecureRandom
 
 /** The bundled llama-server, reachable only from this phone. */
 class LlmServer(nativeLibDir: File, private val models: ModelDownloader, val port: Int = 18089) {
@@ -8,7 +9,8 @@ class LlmServer(nativeLibDir: File, private val models: ModelDownloader, val por
 
     val url: String = "http://127.0.0.1:$port"
 
-    fun command(threads: Int): List<String> = listOf(
+    /** [apiKey] keeps other apps on the phone from using the server; only the bot is given it. */
+    fun command(threads: Int, apiKey: String): List<String> = listOf(
         executable.path,
         "-m", models.file(LlmModel.MODEL).path,
         "--mmproj", models.file(LlmModel.MMPROJ).path,
@@ -16,5 +18,13 @@ class LlmServer(nativeLibDir: File, private val models: ModelDownloader, val por
         // One slot: reading a prompt stalls every other slot anyway (spike 1), so answer one at a time.
         "-c", "8192", "-np", "1", "-t", threads.toString(),
         "--reasoning", "off", "--no-webui",
+        "--api-key", apiKey,
     )
+
+    companion object {
+        fun newApiKey(): String {
+            val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+    }
 }
