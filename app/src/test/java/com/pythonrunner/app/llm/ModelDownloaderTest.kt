@@ -27,6 +27,12 @@ class ModelDownloaderTest {
                 val range = ex.requestHeaders.getFirst("Range")
                 ranges += range
                 val from = range?.removePrefix("bytes=")?.removeSuffix("-")?.toInt() ?: 0
+                if (from >= body.size) {
+                    // Like Hugging Face: a range starting at the end is not satisfiable.
+                    ex.sendResponseHeaders(416, -1)
+                    ex.close()
+                    return@createContext
+                }
                 val part = body.copyOfRange(from, body.size)
                 ex.sendResponseHeaders(if (range != null) 206 else 200, part.size.toLong())
                 ex.responseBody.use { it.write(part) }
@@ -58,6 +64,15 @@ class ModelDownloaderTest {
         assertEquals("bytes=1000-", ranges.first())
         assertTrue(d.isReady())
         assertContentEquals(big, d.file(files[0]).readBytes())
+    }
+
+    @Test fun completePartIsVerifiedWithoutRequest() {
+        // The app was killed after the last byte was written but before the rename.
+        File(dir, "big.gguf.part").writeBytes(big)
+        val d = ModelDownloader(dir, files, base)
+        d.download(onProgress = { _, _ -> }, isCancelled = { false })
+        assertTrue(d.isReady())
+        assertFalse("bytes=3000-" in ranges)
     }
 
     @Test fun rejectsHashMismatch() {

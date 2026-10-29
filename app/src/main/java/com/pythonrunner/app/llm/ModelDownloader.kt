@@ -65,6 +65,11 @@ class ModelDownloader(
             }
         }
 
+        // Killed after the last byte but before the rename: nothing is left to fetch (the server would answer 416).
+        if (have == f.size) {
+            finish(f, part, have, digest)
+            return
+        }
         val conn = URI(baseUrl + f.name).toURL().openConnection() as HttpURLConnection
         conn.connectTimeout = 30_000
         conn.readTimeout = 60_000
@@ -94,6 +99,10 @@ class ModelDownloader(
         } finally {
             conn.disconnect()
         }
+        finish(f, part, have, digest)
+    }
+
+    private fun finish(f: ModelFile, part: File, have: Long, digest: MessageDigest) {
         val actual = digest.digest().joinToString("") { "%02x".format(it) }
         if (have != f.size || actual != f.sha256) {
             part.delete()

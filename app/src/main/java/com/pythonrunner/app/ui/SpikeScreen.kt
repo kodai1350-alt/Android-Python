@@ -413,6 +413,8 @@ fun SpikeScreen() {
                 is LlmState.Failed -> {
                     WorkResultView(WorkResult.Failed(s.message))
                     Button(onClick = { BotController.startModelDownload(context) }) { Text("もう一度ダウンロード（続きから）") }
+                    // A way out when resuming keeps failing: start over from nothing.
+                    OutlinedButton(enabled = !botRunning, onClick = { confirmDeleteModel = true }) { Text("削除して最初から", color = Red) }
                 }
             }
             Text("使うCPUの数（次の起動から）", fontSize = 13.sp, fontWeight = FontWeight.Bold)

@@ -453,41 +453,58 @@ async def stream_answer(session, base_url, messages, on_progress, on_text, *, ap
     deadline = time.monotonic() + wait_seconds
     while True:
         started = False
+        wrote = False
         try:
             async with session.post(base_url + "/v1/chat/completions", json=body, headers=headers,
                                     timeout=timeout) as r:
                 if r.status == 503:
                     raise _NotReady()
                 if r.status >= 400:
-                    detail = await r.text()
-                    if "context" in detail:
-                        raise LlmError(_CONTEXT_MESSAGE)
-                    raise LlmError(f"AIモデルがエラーを返しました（{r.status}）")
+                    raise LlmError(_server_error(await r.text(), r.status))
                 async for raw in r.content:
-                    event = parse_sse(raw.decode("utf-8", "replace"))
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line.startswith("error:"):
+                        raise LlmError(_server_error(line, None))
+                    event = parse_sse(line)
                     if not event:
                         continue
                     started = True
+                    if "error" in event:
+                        raise LlmError(_server_error(json.dumps(event["error"], ensure_ascii=False), None))
                     if "prompt_progress" in event:
                         await on_progress(progress_percent(event["prompt_progress"]))
                     for choice in event.get("choices") or []:
                         piece = (choice.get("delta") or {}).get("content")
                         if piece:
+                            wrote = True
                             await on_text(piece)
-                return
-        except (aiohttp.ClientConnectionError, _NotReady):
+            if not wrote:
+                raise LlmError("AIモデルから答えが返ってきませんでした。もう一度聞いてください。")
+            return
+        except (aiohttp.ClientError, asyncio.TimeoutError, _NotReady) as e:
+            # A drop after reading began is reported, never retried: retrying would repeat the answer.
             if started:
-                raise LlmError("答えている途中でAIモデルが止まりました。もう一度聞いてください。")
+                raise LlmError("答えている途中でAIモデルが止まりました。もう一度聞いてください。") from e
+            if not isinstance(e, (aiohttp.ClientConnectionError, _NotReady)):
+                raise LlmError("AIモデルとのやり取りに失敗しました。もう一度聞いてください。") from e
             if time.monotonic() >= deadline:
-                raise LlmError(_UNREACHABLE_MESSAGE)
+                raise LlmError(_UNREACHABLE_MESSAGE) from e
             await on_progress(-1)
             await asyncio.sleep(2)
+
+
+def _server_error(detail, status):
+    if "context" in detail:
+        return _CONTEXT_MESSAGE
+    return f"AIモデルがエラーを返しました（{status}）" if status else "AIモデルがエラーを返しました"
 
 
 # --- Wikipedia (free, no sign-up) --------------------------------------------
 
 WIKI_API = "https://ja.wikipedia.org/w/api.php"
 WIKI_MAX_CHARS = 3000
+# A hung network must not hold the whole queue.
+WIKI_TIMEOUT = 15
 USER_AGENT = "PythonRunner-askbot/1.0 (https://github.com/kodai1350-alt/Android-Python)"
 
 
@@ -512,13 +529,15 @@ def pick_passages(text, keywords, max_chars=WIKI_MAX_CHARS):
 async def _wiki_query(session, params):
     """The API's "query" part; one retry when Wikipedia answers with an error (e.g. rate limits)."""
     params = {**params, "action": "query", "format": "json", "formatversion": 2}
+    timeout = aiohttp.ClientTimeout(total=WIKI_TIMEOUT)
     for attempt in range(2):
-        async with session.get(WIKI_API, params=params, headers={"User-Agent": USER_AGENT}) as r:
+        async with session.get(WIKI_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=timeout) as r:
             data = await r.json(content_type=None)
         if "query" in data:
             return data["query"]
         log.warning("Wikipedia answered without results: %s", data.get("error", data))
-        await asyncio.sleep(1)
+        if attempt == 0:
+            await asyncio.sleep(1)
     return None
 
 
@@ -568,6 +587,54 @@ def readable_channels(guild, member, registered):
     return readable
 
 
+def shareable_channels(guild, member, registered, answer_channel_id):
+    """Channels whose history may appear in an answer posted to `answer_channel_id`.
+
+    The answer is read by everyone in that channel, not just the asker, so a source must be readable
+    by the asker and be either the answering channel itself or a channel everyone can read.
+    """
+    shareable = set()
+    for channel_id in readable_channels(guild, member, registered):
+        if channel_id == answer_channel_id:
+            shareable.add(channel_id)
+            continue
+        perms = guild.get_channel(channel_id).permissions_for(guild.default_role)
+        if perms.view_channel and perms.read_message_history:
+            shareable.add(channel_id)
+    return shareable
+
+
+def image_refusal(parts, reason):
+    """The reason to refuse outright when photos were sent but none could be read."""
+    return reason if reason and not parts else None
+
+
+def fallback_plan(plan, question):
+    """A history question found nothing: if only a date made it one ("1月1日は何の日？"), answer it
+    as an ordinary question instead. None when the person clearly meant past conversations."""
+    if plan.mode != "history" or any(w in unicodedata.normalize("NFKC", question) for w in _HISTORY_WORDS):
+        return None
+    return Plan("wiki" if plan.keywords else "chat", plan.keywords)
+
+
+async def verify_rows(rows, fetch, store):
+    """Rows as they are on Discord now: deleted ones are dropped (and removed from the store), edited
+    ones updated. Catches changes made while the bot was offline. `fetch(row)` returns the current
+    text, or None when the message is gone."""
+    current = []
+    for row in rows:
+        text = await fetch(row)
+        if text is None:
+            store.delete(row.message_id)
+        elif text != row.content:
+            row = Stored(row.message_id, row.guild_id, row.channel_id, row.author, text, row.created_at)
+            store.upsert(row)
+            current.append(row)
+        else:
+            current.append(row)
+    return current
+
+
 async def collect_images(messages):
     """Image parts from the messages' attachments (at most MAX_IMAGES), and why any were skipped."""
     parts, reasons = [], []
@@ -603,7 +670,8 @@ class AskBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(intents=intents)
+        # Answers quote the model and other people's messages: never let them ping anyone.
+        super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.tree = app_commands.CommandTree(self)
         self.queue = AskQueue()
         self.store = HistoryStore(DB_PATH)
@@ -703,8 +771,17 @@ class AskBot(discord.Client):
         for mention in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
             text = text.replace(mention, "")
         text = text.strip()
+        replying = bool(message.reference and message.reference.message_id)
+        if not text and not message.attachments and not replying:
+            await message.reply(HELP_TEXT, mention_author=False)
+            return
+        # Acknowledge first: downloading photos can take a while on mobile data.
+        first = await message.reply("受け付けました", mention_author=False)
+        if not self.llm_url:
+            await first.edit(content=NO_MODEL_TEXT)
+            return
         reply_to = None
-        if message.reference and message.reference.message_id:
+        if replying:
             reply_to = message.reference.resolved
             if not isinstance(reply_to, discord.Message):
                 try:
@@ -712,20 +789,21 @@ class AskBot(discord.Client):
                 except discord.HTTPException:
                     reply_to = None
         images, image_note = await collect_images([message] + ([reply_to] if reply_to else []))
-        if not text and not images and reply_to is None:
-            await message.reply(HELP_TEXT, mention_author=False)
+        refusal = image_refusal(images, image_note)
+        if refusal:
+            await first.edit(content=f"{refusal}。写真を小さくしてから、もう一度聞いてください。")
             return
         question = text or "これについて教えて"
         plan = plan_question(question, bool(images), datetime.now(JST))
-
-        first = await message.reply("受け付けました", mention_author=False)
-        if not self.llm_url:
-            await first.edit(content=NO_MODEL_TEXT)
-            return
         writer = ReplyWriter(first, message.channel.send)
 
         async def job():
-            await self.answer(message, question, reply_to, images, image_note, plan, writer)
+            try:
+                await self.answer(message, question, reply_to, images, image_note, plan, writer)
+            except Exception:
+                log.exception("answer failed")
+                await writer.append("\n\n⚠ うまく答えられませんでした。もう一度聞いてください。")
+                await writer.finish()
 
         async def on_position(n):
             await first.edit(content=f"順番待ち {n}番目です")
@@ -736,6 +814,17 @@ class AskBot(discord.Client):
         elif position > 0:
             await on_position(position)
 
+    async def _current_text(self, row):
+        channel = self.get_channel(row.channel_id)
+        if channel is None:
+            return None
+        try:
+            return (await channel.fetch_message(row.message_id)).clean_content
+        except discord.NotFound:
+            return None
+        except discord.HTTPException:
+            return row.content
+
     async def answer(self, message, question, reply_to, images, image_note, plan, writer):
         notes = [image_note] if image_note else []
         wiki = rows = None
@@ -744,17 +833,20 @@ class AskBot(discord.Client):
             channels = set()
             if message.guild:
                 registered = self.store.registered(message.guild.id)
-                channels = readable_channels(message.guild, message.author, registered)
-            if not channels:
-                await writer.append("このサーバーには、探せる記録がありません。探したいチャンネルで /記録する をしてください。")
-                await writer.finish()
-                return
-            rows = self.store.search(message.guild.id, channels, plan.keywords, plan.since, plan.until)
+                channels = shareable_channels(message.guild, message.author, registered, message.channel.id)
+            if channels:
+                rows = self.store.search(message.guild.id, channels, plan.keywords, plan.since, plan.until)
+                rows = await verify_rows(rows, self._current_text, self.store)
             if not rows:
-                await writer.append("前の会話から見つかりませんでした。言葉や日付を変えて聞いてみてください。")
-                await writer.finish()
-                return
-        elif plan.mode == "wiki":
+                fallback = fallback_plan(plan, question)
+                if fallback is None:
+                    await writer.append(
+                        "前の会話から見つかりませんでした。言葉や日付を変えて聞いてみてください。" if channels else
+                        "ここから探せる記録がありません。探したいチャンネルで /記録する をしてください。")
+                    await writer.finish()
+                    return
+                plan, rows = fallback, None
+        if plan.mode == "wiki":
             await writer.status("📖 Wikipediaで調べています…")
             wiki = await wiki_lookup(self.session, plan.keywords)
             if wiki is None:

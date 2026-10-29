@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import askbot
 from askbot import ReplyWriter, progress_text, split_message
@@ -552,3 +553,235 @@ def test_commands_registered(tmp_path, monkeypatch):
         return names
 
     assert asyncio.run(run()) == ["記録する", "記録やめる"]
+
+
+# --- Final review fixes --------------------------------------------------------
+
+from askbot import fallback_plan, image_refusal, shareable_channels, verify_rows
+
+
+class PermChannel:
+    def __init__(self, everyone_can_read):
+        self.everyone = everyone_can_read
+
+    def permissions_for(self, who):
+        if who == "everyone":
+            ok = self.everyone
+        else:
+            ok = True
+        return SimpleNamespace(view_channel=ok, read_message_history=ok)
+
+
+def test_private_channel_not_shared_into_another_channel():
+    channels = {1: PermChannel(True), 2: PermChannel(False), 3: PermChannel(False)}
+    guild = SimpleNamespace(get_channel=channels.get, default_role="everyone")
+    # Asked in channel 3 (private): its own history and public channels are fine, private channel 2 is not.
+    assert shareable_channels(guild, "asker", {1, 2, 3}, answer_channel_id=3) == {1, 3}
+
+
+def test_stream_answer_mid_stream_drop_becomes_llm_error():
+    async def handler(request):
+        resp = web.StreamResponse()
+        resp.content_length = 100000
+        await resp.prepare(request)
+        await resp.write(("data: " + json.dumps({"choices": [{"delta": {"content": "あ"}}]}) + "\n\n").encode())
+        request.transport.close()
+        return resp
+
+    async def run():
+        port = free_port()
+        runner = await start_app(port, handler)
+        _, _, on_progress, on_text = collect()
+        try:
+            async with ClientSession() as s:
+                with pytest.raises(LlmError) as e:
+                    await stream_answer(s, f"http://127.0.0.1:{port}", [], on_progress, on_text)
+        finally:
+            await runner.cleanup()
+        assert "途中でAIモデルが止まりました" in str(e.value)
+
+    asyncio.run(run())
+
+
+def test_stream_answer_error_event_becomes_llm_error():
+    async def handler(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        err = {"error": {"message": "the request exceeds the available context size"}}
+        await resp.write(("error: " + json.dumps(err) + "\n\n").encode())
+        return resp
+
+    async def run():
+        port = free_port()
+        runner = await start_app(port, handler)
+        _, _, on_progress, on_text = collect()
+        try:
+            async with ClientSession() as s:
+                with pytest.raises(LlmError) as e:
+                    await stream_answer(s, f"http://127.0.0.1:{port}", [], on_progress, on_text)
+        finally:
+            await runner.cleanup()
+        assert str(e.value).startswith("写真や資料が大きすぎて")
+
+    asyncio.run(run())
+
+
+def test_stream_answer_empty_answer_is_error():
+    async def handler(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    async def run():
+        port = free_port()
+        runner = await start_app(port, handler)
+        _, _, on_progress, on_text = collect()
+        try:
+            async with ClientSession() as s:
+                with pytest.raises(LlmError):
+                    await stream_answer(s, f"http://127.0.0.1:{port}", [], on_progress, on_text)
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
+def test_image_refusal_when_every_photo_was_rejected():
+    assert image_refusal([], "写真が大きすぎます（8MBまで）") == "写真が大きすぎます（8MBまで）"
+    assert image_refusal([{"type": "image_url"}], "写真は最初の2枚だけ見ます") is None
+    assert image_refusal([], None) is None
+
+
+def test_date_only_history_falls_back_when_nothing_found():
+    p = plan_question("1月1日は何の日？", False, NOW)
+    assert p.mode == "history"
+    assert fallback_plan(p, "1月1日は何の日？").mode == "chat"
+    q = plan_question("8月の東京の平均気温は？", False, NOW)
+    assert fallback_plan(q, "8月の東京の平均気温は？").mode == "wiki"
+    r = plan_question("先週ラーメン屋の話したけど、どこだっけ？", False, NOW)
+    assert fallback_plan(r, "先週ラーメン屋の話したけど、どこだっけ？") is None
+
+
+def test_wiki_lookup_times_out(monkeypatch):
+    async def slow(request):
+        await asyncio.sleep(5)
+        return web.json_response({})
+
+    async def run():
+        port = free_port()
+        app = web.Application()
+        app.router.add_get("/w/api.php", slow)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        monkeypatch.setattr(askbot, "WIKI_API", f"http://127.0.0.1:{port}/w/api.php")
+        monkeypatch.setattr(askbot, "WIKI_TIMEOUT", 0.5)
+        start = time.monotonic()
+        async with ClientSession() as s:
+            result = await askbot.wiki_lookup(s, ["ラーメン"])
+        took = time.monotonic() - start
+        await runner.cleanup()
+        return result, took
+
+    result, took = asyncio.run(run())
+    assert result is None
+    assert took < 4
+
+
+def test_verify_rows_drops_deleted_and_updates_edited(tmp_path):
+    s = store_with(tmp_path, msg(1, "ラーメン"), msg(2, "ラーメン屋"), msg(3, "ラーメン"))
+    current = {1: "ラーメン", 2: "ラーメン屋は駅前に移転", 3: None}
+
+    async def fetch(row):
+        return current[row.message_id]
+
+    rows = s.search(G, {C1}, ["ラーメン"], None, None)
+    checked = asyncio.run(verify_rows(rows, fetch, s))
+    assert sorted((r.message_id, r.content) for r in checked) == [(1, "ラーメン"), (2, "ラーメン屋は駅前に移転")]
+    assert sorted(r.message_id for r in s.search(G, {C1}, ["ラーメン"], None, None)) == [1, 2]
+
+
+def test_bot_never_pings(tmp_path, monkeypatch):
+    monkeypatch.setattr(askbot, "DB_PATH", str(tmp_path / "h.db"))
+
+    async def run():
+        bot = askbot.AskBot()
+        mentions = bot.allowed_mentions
+        await bot.close()
+        return mentions
+
+    m = asyncio.run(run())
+    assert (m.everyone, m.users, m.roles, m.replied_user) == (False, False, False, False)
+
+
+class FakeAuthor(SimpleNamespace):
+    pass
+
+
+def make_question(content, attachments=(), bot_id=999):
+    sent = []
+
+    class Msg:
+        def __init__(self):
+            self.content = content
+            self.clean_content = content
+            self.attachments = list(attachments)
+            self.reference = None
+            self.author = FakeAuthor(id=7, bot=False)
+            self.guild = None
+            self.channel = SimpleNamespace(id=5, send=None)
+
+        async def reply(self, text, **kwargs):
+            m = FakeMessage(text)
+            sent.append(m)
+            return m
+
+    return Msg(), sent
+
+
+def bot_for_glue(tmp_path, monkeypatch):
+    monkeypatch.setattr(askbot, "DB_PATH", str(tmp_path / "h.db"))
+    monkeypatch.setenv("LLM_URL", "http://127.0.0.1:1")
+    bot = askbot.AskBot()
+    bot._connection.user = SimpleNamespace(id=999)
+    return bot
+
+
+def test_ack_is_sent_before_photos_are_downloaded(tmp_path, monkeypatch):
+    order = []
+
+    class SlowAttachment(FakeAttachment):
+        async def read(self):
+            order.append("read")
+            return b"img"
+
+    async def run():
+        bot = bot_for_glue(tmp_path, monkeypatch)
+        message, sent = make_question("<@999> これ何？", [SlowAttachment(10)])
+        original = message.reply
+
+        async def reply(text, **kw):
+            order.append("reply")
+            return await original(text, **kw)
+
+        message.reply = reply
+        await bot.handle_question(message)
+        await bot.close()
+
+    asyncio.run(run())
+    assert order[:2] == ["reply", "read"]
+
+
+def test_only_oversized_photo_is_refused(tmp_path, monkeypatch):
+    async def run():
+        bot = bot_for_glue(tmp_path, monkeypatch)
+        message, sent = make_question("<@999>", [FakeAttachment(9 * 1024 * 1024)])
+        await bot.handle_question(message)
+        busy = bot.queue.busy_users()
+        await bot.close()
+        return sent, busy
+
+    sent, busy = asyncio.run(run())
+    assert "写真が大きすぎます（8MBまで）" in sent[0].content
+    assert busy == set()
