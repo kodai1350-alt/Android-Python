@@ -18,6 +18,9 @@ class LlmServer(nativeLibDir: File, private val models: ModelDownloader, val por
         // One slot: reading a prompt stalls every other slot anyway (spike 1), so answer one at a time.
         "-c", "8192", "-np", "1", "-t", threads.toString(),
         "--reasoning", "off", "--no-webui",
+        // A camera photo would otherwise take the model's 4096-token maximum: tens of minutes or
+        // out of memory. 512 tokens is about 730x730 pixels.
+        "--image-max-tokens", "512",
         "--api-key", apiKey,
     )
 

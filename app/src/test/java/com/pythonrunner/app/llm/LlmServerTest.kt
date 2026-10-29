@@ -19,6 +19,7 @@ class LlmServerTest {
                 "--host", "127.0.0.1", "--port", "18089",
                 "-c", "8192", "-np", "1", "-t", "4",
                 "--reasoning", "off", "--no-webui",
+                "--image-max-tokens", "512",
                 "--api-key", "k123",
             ),
             server.command(4, "k123"),

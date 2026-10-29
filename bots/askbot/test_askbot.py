@@ -39,7 +39,7 @@ def test_split_message_without_newlines():
 
 def test_progress_text_clamps():
     assert progress_text("wiki", 130) == "📖 Wikipediaを読んでいます… 100%"
-    assert progress_text("photo", -5) == "🖼 写真を見ています… 0%"
+    assert progress_text("photo", -5) == "🖼 写真を見ています… 0%（数分かかります）"
 
 
 def test_reply_writer_throttles():

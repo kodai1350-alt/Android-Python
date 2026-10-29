@@ -32,7 +32,8 @@ EDIT_INTERVAL = 1.5
 
 _PROGRESS = {
     "wiki": "📖 Wikipediaを読んでいます… {p}%",
-    "photo": "🖼 写真を見ています… {p}%",
+    # Photos sit at a low percent while the image is encoded, so say that a wait is normal.
+    "photo": "🖼 写真を見ています… {p}%（数分かかります）",
     "history": "🔎 前の会話を読んでいます… {p}%",
     "question": "💭 質問を読んでいます… {p}%",
 }
