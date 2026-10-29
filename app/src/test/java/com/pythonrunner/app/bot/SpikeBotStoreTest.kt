@@ -30,6 +30,12 @@ class SpikeBotStoreTest {
         assertEquals(vars, SpikeBotStore(base, prefs).envVars)
     }
 
+    @Test fun llmThreadsDefaultsToFour() {
+        assertEquals(4, SpikeBotStore(base, prefs).llmThreads)
+        SpikeBotStore(base, prefs).llmThreads = 2
+        assertEquals(2, SpikeBotStore(base, prefs).llmThreads)
+    }
+
     @Test fun importPyRejectsPathTraversal() {
         val store = SpikeBotStore(base, prefs)
         assertFailsWith<IllegalArgumentException> {
