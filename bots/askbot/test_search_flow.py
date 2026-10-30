@@ -239,3 +239,35 @@ def test_asker_without_history_permission_is_refused(tmp_path, monkeypatch):
     message, sent = mention("旅行の話", readable(id=A, name="雑談", history=False))
     assert ask(bot, message, sent) == ["このチャンネルの履歴を読む権限がないので、探せません"]
     assert bot.queue.busy_users() == set()
+
+
+def chat(content, mentions=()):
+    return SimpleNamespace(
+        id=50, guild=SimpleNamespace(id=G), channel=readable(id=A, name="雑談"), content=content,
+        clean_content=content, author=SimpleNamespace(id=7, bot=False, display_name="百鬼"), webhook_id=None,
+        embeds=[], attachments=[], created_at=T0, mentions=list(mentions))
+
+
+def test_questions_to_tsumugi_are_not_recorded(tmp_path, monkeypatch):
+    # Recorded, a question would come back as the best match for itself.
+    bot = make_bot(tmp_path, monkeypatch)
+    bot.records.register(G, A)
+    bot._record(chat("<@999> 旅行の日程の話どこ？", [bot.user]))
+    assert bot.records.stats(A).messages == 0
+    bot._record(chat("旅行の日程は来週"))
+    assert bot.records.stats(A).messages == 1
+    asyncio.run(bot.close())
+
+
+def test_reply_ping_without_mention_text_is_ignored(tmp_path, monkeypatch):
+    bot = make_bot(tmp_path, monkeypatch)
+    asked = []
+
+    async def handle(message):
+        asked.append(message)
+
+    bot.handle_question = handle
+    asyncio.run(bot.on_message(chat("ありがとう", [bot.user])))  # a reply to 紬's card pings it
+    asyncio.run(bot.on_message(chat("<@999> 猫の写真", [bot.user])))
+    assert [m.content for m in asked] == ["<@999> 猫の写真"]
+    asyncio.run(bot.close())

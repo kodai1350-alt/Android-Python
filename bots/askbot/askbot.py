@@ -1407,15 +1407,21 @@ class AskBot(discord.Client):
         if announce_to is not None:
             await announce_to.send(f"📚 過去の会話を{count}件読み込みました。")
 
+    def _asks_me(self, message):
+        """Written to 紬 with an @mention. A reply to 紬's card also pings it, but is not a question."""
+        return f"<@{self.user.id}>" in message.content or f"<@!{self.user.id}>" in message.content
+
     def _record(self, message):
-        if message.guild and should_record(message) and self.records.is_registered(record_of(message.channel)[0]):
+        # Questions to 紬 are not recorded: they would come back as the best match for themselves.
+        if (message.guild and should_record(message) and not self._asks_me(message)
+                and self.records.is_registered(record_of(message.channel)[0])):
             self.records.upsert(*to_record(message))
 
     async def on_message(self, message):
         if message.author.bot:
             return
         self._record(message)
-        if self.user in message.mentions:
+        if self._asks_me(message):
             await self.handle_question(message)
 
     async def on_raw_message_edit(self, payload):
