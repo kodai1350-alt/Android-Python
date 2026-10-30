@@ -1193,6 +1193,136 @@ async def wiki_lookup(session, keywords):
     return title, url, pick_passages(text, keywords)
 
 
+# --- Cards (Components V2) ------------------------------------------------------
+
+BLUE, YELLOW, GREEN = 0x5865F2, 0xF0B232, 0x23A55A
+PAGE_SIZE = 5
+UNCHECKED_NOTE = "-# ※ AIモデルで確かめられなかったので、言葉が当たった順に並べています"
+
+
+@dataclass
+class SearchResult:
+    items: list  # Msg or Photo, best first
+    checked: bool  # the model confirmed them
+    thumbs: dict  # attachment_id -> a fresh image URL
+
+
+def jump_link(guild_id, place_id, message_id):
+    return f"https://discord.com/channels/{guild_id}/{place_id}/{message_id}"
+
+
+def _date(dt, now):
+    dt = dt.astimezone(JST)
+    return (f"{dt.month}月{dt.day}日" if dt.year == now.astimezone(JST).year
+            else f"{dt.year}年{dt.month}月{dt.day}日")
+
+
+def period_text(since, until, now):
+    if since is None and until is None:
+        return "全期間"
+    start = _date(since, now) if since else ""
+    end = _date(until - timedelta(days=1), now) if until else ""
+    return f"{start}〜{end}"
+
+
+def _card(color, *items):
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*items, accent_color=color))
+    return view
+
+
+def status_card(text):
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay(text)))
+    return view
+
+
+def _item_text(n, item, now):
+    head = f"**{n}**　{_date(item.created_at, now)}　{item.author}"
+    if isinstance(item, Photo):
+        return f"{head}\n{item.kind} ・ {item.description}"
+    lines = [head]
+    if item.links:
+        links = item.links.split("\n")
+        urls = [x for x in links if x.startswith("http")]
+        titles = [x for x in links if not x.startswith("http")]
+        lines += urls[:1] + [f"-# {t[:100]}" for t in titles[:1]]
+    if item.content and not (item.links and item.content.strip() in item.links):
+        lines.append(item.content.replace("\n", " ")[:100])
+    return "\n".join(lines)
+
+
+def results_card(query, title, place_name, result, page, *, now=None):
+    """One page of results: a header, PAGE_SIZE items each with a way back to the original message,
+    and buttons for more. Interactive parts carry custom_ids ("more", "kind") for the caller to wire."""
+    now = now or datetime.now(JST)
+    photos = query.kind == "photo"
+    items = result.items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    parts = [
+        discord.ui.TextDisplay(f"### {'🖼' if photos else '🔎'} {title}"),
+        discord.ui.TextDisplay(f"-# #{place_name} の記録から ・ {period_text(query.since, query.until, now)}"
+                               f" ・ {len(result.items)}件見つかりました"),
+    ]
+    opens = []
+    for i, item in enumerate(items):
+        n = page * PAGE_SIZE + i + 1
+        link = jump_link(item.guild_id, item.place_id, item.message_id)
+        thumb = result.thumbs.get(item.attachment_id) if photos else None
+        accessory = (discord.ui.Thumbnail(thumb) if thumb
+                     else discord.ui.Button(label="元の発言へ", url=link))
+        if thumb:
+            opens.append(discord.ui.Button(label=f"{n} を開く", url=link))
+        parts += [discord.ui.Separator(), discord.ui.Section(_item_text(n, item, now), accessory=accessory)]
+    if opens:
+        parts.append(discord.ui.ActionRow(*opens))
+    if (page + 1) * PAGE_SIZE < len(result.items):
+        parts.append(discord.ui.ActionRow(discord.ui.Button(label="もっと見る", custom_id="more")))
+    if photos:
+        parts.append(discord.ui.ActionRow(discord.ui.Select(
+            custom_id="kind", placeholder="種類でしぼる",
+            options=[discord.SelectOption(label=k, value=k) for k in PHOTO_KINDS])))
+    if not result.checked:
+        parts.append(discord.ui.TextDisplay(UNCHECKED_NOTE))
+    return _card(YELLOW if photos else BLUE, *parts)
+
+
+def not_found_card(query, place_name, *, now=None):
+    now = now or datetime.now(JST)
+    words = "、".join(query.words) or "（なし）"
+    parts = [
+        discord.ui.TextDisplay("### 🔎 見つかりませんでした"),
+        discord.ui.TextDisplay(f"-# #{place_name} の記録から ・ 言葉: {words} ・ "
+                               f"期間: {period_text(query.since, query.until, now)}"),
+    ]
+    if query.since is not None or query.until is not None:
+        parts.append(discord.ui.ActionRow(discord.ui.Button(label="期間を広げて探す", custom_id="widen")))
+    return _card(YELLOW if query.kind == "photo" else BLUE, *parts)
+
+
+HELP_LINES = (
+    "### 紬は探しもの専門です\n"
+    "メンションして、覚えていることをそのまま書いてね。たとえば:\n"
+    "・@紬 Eラーニングの話で半年前ぐらいに貼ってたURLどれ？\n"
+    "・@紬 半月前のラーメンの写真\n"
+    "・@紬 先週、旅行の日程の話してたのどこ？"
+)
+
+
+def help_card():
+    return _card(BLUE, discord.ui.TextDisplay(HELP_LINES), discord.ui.TextDisplay(
+        "-# 探せるのは、/記録する をしたチャンネル（スレッドも含む）の会話と写真です。"))
+
+
+def record_card(place_name, stats):
+    since = f"（{stats.since.astimezone(JST).year}年{stats.since.astimezone(JST).month}月〜）" if stats.since else ""
+    lines = [f"会話　**{stats.messages:,}件**{since}",
+             f"写真　**{stats.classified:,} / {stats.photos:,}枚** 分類ずみ"]
+    if stats.classified < stats.photos:
+        lines[-1] += "　-# 残りは空き時間に進めます"
+    return _card(GREEN, discord.ui.TextDisplay(f"### 📁 #{place_name} の記録"), discord.ui.Separator(),
+                 discord.ui.TextDisplay("\n".join(lines)))
+
+
 # --- Discord ------------------------------------------------------------------
 
 MAX_IMAGES = 2
