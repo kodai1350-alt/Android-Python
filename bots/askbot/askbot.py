@@ -1008,7 +1008,7 @@ def record_card(place_name, stats):
     lines = [f"会話　**{stats.messages:,}件**{since}",
              f"写真　**{stats.classified:,} / {stats.photos:,}枚** 分類ずみ"]
     if stats.classified < stats.photos:
-        lines[-1] += "　-# 残りは空き時間に進めます"
+        lines.append("-# 残りは空き時間に進めます")
     return _card(GREEN, discord.ui.TextDisplay(f"### 📁 #{place_name} の記録"), discord.ui.Separator(),
                  discord.ui.TextDisplay("\n".join(lines)))
 

@@ -119,3 +119,11 @@ def test_accent_colors():
 
 def test_status_card_is_one_text():
     assert texts(status_card("🔎 探しています…")) == ["🔎 探しています…"]
+
+
+def test_record_card_note_is_its_own_small_line():
+    # "-#" only makes small text at the start of a line; mid-line Discord shows it literally.
+    t = "\n".join(texts(record_card("飯テロ", RecordStats(10, None, 5, 2))))
+    assert "\n-# 残りは空き時間に進めます" in t
+    assert "　-#" not in t
+    assert "残りは" not in "\n".join(texts(record_card("飯テロ", RecordStats(10, None, 5, 5))))
