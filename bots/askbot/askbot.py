@@ -114,10 +114,12 @@ class AskQueue:
     never interleaved and never cut short for the next person.
     """
 
-    def __init__(self):
+    def __init__(self, idle=None):
         self._waiting = []
         self._running_user = None
         self._wake = asyncio.Event()
+        # Background work (photo classification) run while nobody is waiting; a question cancels it.
+        self._idle = idle
 
     def busy_users(self):
         users = {user for user, _, _ in self._waiting}
@@ -137,7 +139,10 @@ class AskQueue:
         while True:
             if not self._waiting:
                 self._wake.clear()
-                await self._wake.wait()
+                if self._idle is None:
+                    await self._wake.wait()
+                else:
+                    await self._run_idle()
                 continue
             user, job, _ = self._waiting.pop(0)
             self._running_user = user
@@ -152,6 +157,23 @@ class AskQueue:
                 log.exception("question failed")
             finally:
                 self._running_user = None
+
+    async def _run_idle(self):
+        """One round of idle work, cut short the moment a question arrives."""
+        idle = asyncio.create_task(self._idle())
+        wake = asyncio.create_task(self._wake.wait())
+        try:
+            await asyncio.wait({idle, wake}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (idle, wake):
+                task.cancel()
+            for task in (idle, wake):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    log.exception("idle work failed")
 
 
 # --- Questions: which kind, which words, which dates ------------------------
@@ -857,6 +879,78 @@ async def check_candidates(session, base_url, question, items, *, api_key=None, 
         return items, False
     return kept, True
 
+
+# --- Classifying photos in idle time -------------------------------------------
+
+CLASS_SCHEMA = {
+    "type": "object",
+    "properties": {"kind": {"type": "string", "enum": PHOTO_KINDS}, "description": {"type": "string"}},
+    "required": ["kind", "description"],
+}
+CLASS_PROMPT = (
+    "この写真の種類を選び、写っているものを日本語80文字までで説明してください。"
+    "写真に文字が写っていれば、その文字も説明に入れてください。"
+)
+IDLE_SLEEP = 60
+
+
+async def classify(session, base_url, data, content_type, *, api_key=None):
+    """(kind, description) of one photo. An answer that does not fit becomes その他."""
+    body = {
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": [image_part(data, content_type), {"type": "text", "text": CLASS_PROMPT}]},
+        ],
+        "response_format": {"type": "json_schema", "json_schema": {"schema": CLASS_SCHEMA}},
+        "temperature": 0.1, "max_tokens": 200,
+    }
+    reply = await llm_call(session, base_url, body, api_key=api_key)
+    try:
+        answer = json.loads(reply.text)
+        kind, description = answer.get("kind"), answer.get("description")
+    except (ValueError, AttributeError):
+        kind, description = None, None
+    if kind not in PHOTO_KINDS:
+        kind = "その他"
+    return kind, (description if isinstance(description, str) else "").strip()[:80]
+
+
+class PhotoClassifier:
+    """Classifies the newest unclassified photo, one per run_once. Meant as AskQueue's idle work: a
+    question cancels it mid-photo, and that photo simply stays unclassified until the next round."""
+
+    def __init__(self, store, fetch_image, classify, sleep=asyncio.sleep):
+        self._store = store
+        # photo -> (bytes, content_type); bytes None when too big to download; None when deleted.
+        self._fetch = fetch_image
+        self._classify = classify  # (bytes, content_type) -> (kind, description)
+        self._sleep = sleep
+
+    async def run_once(self):
+        photo = self._store.next_unclassified()
+        if photo is None:
+            await self._sleep(IDLE_SLEEP)
+            return
+        try:
+            image = await self._fetch(photo)
+            if image is None:
+                self._store.delete_message(photo.message_id)
+                return
+            data, content_type = image
+            if data is None or len(data) > MAX_IMAGE_BYTES:
+                self._store.save_class(photo.attachment_id, "その他", "（大きすぎて見られませんでした）")
+                return
+            kind, description = await self._classify(data, content_type)
+        except discord.Forbidden:
+            # Never readable again: do not let it block every photo behind it.
+            self._store.save_class(photo.attachment_id, "その他", "（見られませんでした）")
+            return
+        except (LlmError, discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError):
+            log.exception("could not classify photo %s; trying again later", photo.attachment_id)
+            await self._sleep(IDLE_SLEEP)
+            return
+        self._store.save_class(photo.attachment_id, kind, description)
+
 MAX_ANSWER_TOKENS = 1500
 _CONTEXT_MESSAGE = "写真や資料が大きすぎて読み切れませんでした。写真を減らすか、質問を短くしてください。"
 _UNREACHABLE_MESSAGE = (
@@ -1293,7 +1387,6 @@ class AskBot(discord.Client):
         # Answers quote the model and other people's messages: never let them ping anyone.
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.tree = app_commands.CommandTree(self)
-        self.queue = AskQueue()
         self.store = HistoryStore(DB_PATH)
         self.records = RecordStore(RECORDS_PATH)
         self.records.import_old(DB_PATH)
@@ -1301,6 +1394,8 @@ class AskBot(discord.Client):
         self.llm_key = os.environ.get("LLM_API_KEY")
         self.session = None
         self._tasks = set()
+        self.classifier = PhotoClassifier(self.records, self._fetch_image, self._classify)
+        self.queue = AskQueue(idle=self.classifier.run_once if self.llm_url else None)
 
     def _spawn(self, coro):
         task = asyncio.create_task(coro)
@@ -1312,6 +1407,25 @@ class AskBot(discord.Client):
         self._spawn(self.queue.run_forever())
         self._add_commands()
         await self.tree.sync()
+
+    async def _classify(self, data, content_type):
+        return await classify(self.session, self.llm_url, data, content_type, api_key=self.llm_key)
+
+    async def _fetch_image(self, photo):
+        """The photo as it is on Discord now, or None when its message or the image is gone."""
+        channel = self.get_channel(photo.place_id)
+        try:
+            if channel is None:
+                channel = await self.fetch_channel(photo.place_id)
+            message = await channel.fetch_message(photo.message_id)
+        except discord.NotFound:
+            return None
+        for a in message.attachments:
+            if a.id == photo.attachment_id:
+                if a.size > MAX_IMAGE_BYTES:
+                    return None, a.content_type  # too big: never downloaded
+                return await a.read(), (a.content_type or "image/jpeg").split(";")[0]
+        return None
 
     async def close(self):
         if self.session:
