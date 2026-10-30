@@ -480,6 +480,7 @@ class RecordStats:
 
 _RECORD_SCHEMA = """
 CREATE TABLE IF NOT EXISTS records(record_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS messages(
     message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, record_id INTEGER NOT NULL,
     place_id INTEGER NOT NULL, private INTEGER NOT NULL, author TEXT NOT NULL, content TEXT NOT NULL,
@@ -679,9 +680,12 @@ class RecordStore:
 
     def import_old(self, path):
         """Carries over which channels were recorded by the old askbot database (the messages are read
-        again from Discord). The old file is left as it is."""
-        if not os.path.exists(path):
+        again from Discord). Runs once: a channel unregistered later must not come back on restart.
+        The old file is left as it is."""
+        if self._db.execute("SELECT 1 FROM meta WHERE key = 'imported_old'").fetchone() or not os.path.exists(path):
             return
+        with self._db:
+            self._db.execute("INSERT INTO meta VALUES ('imported_old', '1')")
         old = sqlite3.connect(path)
         try:
             rows = old.execute("SELECT channel_id, guild_id FROM channels").fetchall()
@@ -1194,6 +1198,7 @@ class AskBot(discord.Client):
         async def stop_recording(interaction: discord.Interaction):
             record_id, _, _ = record_of(interaction.channel)
             self.records.unregister(interaction.guild_id, record_id)
+            self.store.unregister(interaction.guild_id, record_id)  # the old store, until it is removed
             await interaction.response.send_message("記録をやめて、保存していた分を消しました。")
 
         self.tree.add_command(record)
@@ -1232,10 +1237,12 @@ class AskBot(discord.Client):
 
     async def on_raw_message_delete(self, payload):
         self.records.delete_message(payload.message_id)
+        self.store.delete(payload.message_id)
 
     async def on_raw_bulk_message_delete(self, payload):
         for message_id in payload.message_ids:
             self.records.delete_message(message_id)
+            self.store.delete(message_id)
 
     # --- questions ---
 

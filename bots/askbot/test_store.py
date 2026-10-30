@@ -162,3 +162,17 @@ def test_import_old_copies_registrations(tmp_path):
     assert s.registered(G) == {B}
     assert old.exists()
     s.import_old(str(tmp_path / "missing.db"))  # no old file: nothing happens
+
+
+def test_import_old_runs_only_once(tmp_path):
+    old = tmp_path / "askbot-history.db"
+    db = sqlite3.connect(old)
+    db.execute("CREATE TABLE channels(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL)")
+    db.execute("INSERT INTO channels VALUES (?, ?)", (B, G))
+    db.commit()
+    db.close()
+    s = RecordStore(str(tmp_path / "tsumugi.db"))
+    s.import_old(str(old))
+    s.unregister(G, B)  # /記録やめる must stick across restarts
+    RecordStore(str(tmp_path / "tsumugi.db")).import_old(str(old))
+    assert RecordStore(str(tmp_path / "tsumugi.db")).registered(G) == set()
