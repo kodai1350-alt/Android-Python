@@ -701,11 +701,105 @@ class RecordStore:
 
 # First in every request, unchanged, so llama-server can reuse its cached reading of it.
 SYSTEM_PROMPT = (
-    "あなたはDiscordサーバーの質問に答えるアシスタントです。日本語で、分かりやすく、親切に答えてください。"
-    "資料が渡されたときは、資料に書かれていることだけを使って答えてください。"
-    "資料に書かれていないことは「資料には書かれていません」と言ってください。"
-    "分からないことを作り話で答えてはいけません。分からないときは、分からないと言ってください。"
+    "あなたは紬（つむぎ）です。Discordの過去の会話・URL・写真を探す手伝いだけをします。"
+    "頼みを読んで、必ず search ツールを1回呼んでください。"
+    "探しもの以外の頼み（あいさつ、ふつうの質問など）は kind を other にしてください。"
 )
+
+# --- Understanding a request: what to look for, which words, when -----------
+
+PHOTO_KINDS = ["料理", "風景", "スクショ", "人物", "ペット・動物", "乗り物", "買い物・物", "文書・メモ", "その他"]
+KINDS = ("message", "link", "photo", "other")
+# Whether the model's kind wins over rule_kind (decided by the phone spike, plan Task 1).
+TRUST_MODEL_KIND = True
+
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search",
+        "description": "Discordの記録から探す条件を決める",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string", "enum": list(KINDS),
+                    "description": "message=会話、link=URLやリンク、photo=写真や画像、other=探しもの以外",
+                },
+                "words": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "探す言葉。頼みの中の大事な言葉と、似た言葉や言いかえを3つまで。"
+                                   "時期の言葉や「写真」「URL」は入れない",
+                },
+                "when": {
+                    "type": "string",
+                    "description": "時期の言葉を頼みのまま（例: 半年前ぐらい、先週、去年の夏）。なければ空",
+                },
+                "photo_kind": {
+                    "type": "string", "enum": PHOTO_KINDS + [""],
+                    "description": "写真の種類でしぼるとき。なければ空",
+                },
+            },
+            "required": ["kind", "words"],
+        },
+    },
+}
+
+_PHOTO_WORDS = ("写真", "画像", "スクショ", "フォト", "pic")
+_LINK_WORDS = ("URL", "url", "リンク", "サイト", "ページ", "http")
+_NOT_WORDS = {"写真", "画像", "スクショ", "URL", "url", "リンク", "サイト", "ページ", "会話", "どれ", "どこ"}
+
+
+@dataclass
+class Query:
+    kind: str  # "message" | "link" | "photo" | "other"
+    words: list
+    since: datetime
+    until: datetime
+    photo_kind: str = None
+    when_text: str = None
+
+
+def _plain_words(text, now):
+    """The question's own nouns, without time words or words like 写真 and URL."""
+    return [w for w in extract_keywords(text)
+            if w not in _NOT_WORDS and parse_when(w, now) == (None, None)]
+
+
+def rule_kind(text, now=None):
+    """The kind by fixed words: the fallback when the model's answer cannot be used."""
+    text = unicodedata.normalize("NFKC", text)
+    if any(w in text for w in _PHOTO_WORDS):
+        return "photo"
+    if any(w in text for w in _LINK_WORDS):
+        return "link"
+    now = now or datetime.now(JST)
+    if not _plain_words(text, now) and parse_when(text, now) == (None, None):
+        return "other"
+    return "message"
+
+
+async def understand(session, base_url, question, now, *, api_key=None):
+    """What the person is looking for. The model picks the kind and words; dates always come from
+    parse_when (a small model is unreliable at date arithmetic)."""
+    body = {
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": question}],
+        "tools": [SEARCH_TOOL], "tool_choice": "required", "temperature": 0.1, "max_tokens": 200,
+    }
+    args = (await llm_call(session, base_url, body, api_key=api_key)).tool_args or {}
+    kind = args.get("kind")
+    if not TRUST_MODEL_KIND or kind not in KINDS:
+        kind = rule_kind(question, now)
+    words = []
+    for w in args.get("words") or []:
+        if isinstance(w, str) and w.strip() and w.strip() not in words:
+            words.append(w.strip())
+    words = words or _plain_words(question, now)
+    when = args.get("when") if isinstance(args.get("when"), str) and args.get("when").strip() else None
+    since, until = parse_when(when, now) if when else (None, None)
+    if since is None and until is None:
+        since, until = parse_when(question, now)
+    photo_kind = args.get("photo_kind") if args.get("photo_kind") in PHOTO_KINDS else None
+    return Query(kind, words, since, until, photo_kind, when)
 
 MAX_ANSWER_TOKENS = 1500
 _CONTEXT_MESSAGE = "写真や資料が大きすぎて読み切れませんでした。写真を減らすか、質問を短くしてください。"
