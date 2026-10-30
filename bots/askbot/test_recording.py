@@ -136,12 +136,26 @@ def test_backfill_skips_threads_it_cannot_read(tmp_path):
     assert asyncio.run(backfill(s, channel)) == 1
 
 
+class Forum:
+    """Like discord.ForumChannel: no history of its own, and archived_threads() takes no `private`."""
+
+    def __init__(self, id, threads=(), archived=()):
+        self.id = id
+        self.threads = list(threads)
+        self._archived = list(archived)
+
+    async def archived_threads(self, *, limit=None, before=None):
+        for t in self._archived:
+            yield t
+
+
 def test_forum_without_history_reads_its_posts(tmp_path):
     s = store(tmp_path)
     post = Place(T, parent_id=A)
     post.messages = [message(1, post, "フォーラムの投稿")]
-    forum = SimpleNamespace(id=A, threads=[post], archived_threads=Channel(A).archived_threads)
-    assert asyncio.run(backfill(s, forum)) == 1
+    old = Place(301, parent_id=A)
+    old.messages = [message(2, old, "古い投稿")]
+    assert asyncio.run(backfill(s, Forum(A, threads=[post], archived=[old]))) == 2
 
 
 def test_backfill_not_fooled_by_live_messages(tmp_path):

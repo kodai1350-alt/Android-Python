@@ -1039,9 +1039,13 @@ async def _threads(channel):
     for t in list(getattr(channel, "threads", [])):
         seen.add(t.id)
         yield t
-    for private in (False, True):
+    # A text channel lists public and private archived threads separately; a forum (no history of its
+    # own) has only public posts and its archived_threads() takes no `private`.
+    kinds = ({}, {"private": True}) if hasattr(channel, "history") else ({},)
+    for kind in kinds:
+        private = bool(kind)
         try:
-            async for t in channel.archived_threads(limit=None, private=private):
+            async for t in channel.archived_threads(limit=None, **kind):
                 if t.id not in seen:
                     seen.add(t.id)
                     yield t
