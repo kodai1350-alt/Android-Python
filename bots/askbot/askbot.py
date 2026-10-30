@@ -1308,6 +1308,7 @@ class AskBot(discord.Client):
         self.llm_key = os.environ.get("LLM_API_KEY")
         self.session = None
         self._tasks = set()
+        self._reading = set()  # channels being read back
         self.classifier = PhotoClassifier(self.records, self._fetch_image, self._classify)
         self.queue = AskQueue(idle=self.classifier.run_once if self.llm_url else None)
 
@@ -1394,18 +1395,27 @@ class AskBot(discord.Client):
         self.tree.add_command(record_status)
 
     async def read_back(self, channel, announce_to):
-        """backfill, telling `announce_to` (when given) how it went."""
-        try:
-            count = await backfill(self.records, channel)
-        except discord.Forbidden:
+        """backfill, telling `announce_to` (when given) how it went. One at a time per channel: on_ready
+        fires again after every reconnect that cannot resume, which is common on a phone."""
+        if channel.id in self._reading:
             if announce_to is not None:
-                await announce_to.send("このチャンネルの履歴を読む権限がありません（「メッセージ履歴を読む」を許可してください）。")
+                await announce_to.send("今、このチャンネルの過去の会話を読み込んでいるところです。")
             return
-        except Exception:
-            log.exception("reading back %s failed", channel.id)
-            return
-        if announce_to is not None:
-            await announce_to.send(f"📚 過去の会話を{count}件読み込みました。")
+        self._reading.add(channel.id)
+        try:
+            try:
+                count = await backfill(self.records, channel)
+            except discord.Forbidden:
+                if announce_to is not None:
+                    await announce_to.send("このチャンネルの履歴を読む権限がありません（「メッセージ履歴を読む」を許可してください）。")
+                return
+            except Exception:
+                log.exception("reading back %s failed", channel.id)
+                return
+            if announce_to is not None:
+                await announce_to.send(f"📚 過去の会話を{count}件読み込みました。")
+        finally:
+            self._reading.discard(channel.id)
 
     def _asks_me(self, message):
         """Written to 紬 with an @mention. A reply to 紬's card also pings it, but is not a question."""

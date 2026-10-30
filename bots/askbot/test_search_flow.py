@@ -271,3 +271,24 @@ def test_reply_ping_without_mention_text_is_ignored(tmp_path, monkeypatch):
     asyncio.run(bot.on_message(chat("<@999> 猫の写真", [bot.user])))
     assert [m.content for m in asked] == ["<@999> 猫の写真"]
     asyncio.run(bot.close())
+
+
+def test_read_back_runs_once_per_channel_at_a_time(tmp_path, monkeypatch):
+    bot = make_bot(tmp_path, monkeypatch)
+    calls = []
+
+    async def slow_backfill(store, channel):
+        calls.append(channel.id)
+        await asyncio.sleep(0.05)
+        return 0
+
+    monkeypatch.setattr(askbot, "backfill", slow_backfill)
+    channel = SimpleNamespace(id=A)
+
+    async def run():
+        await asyncio.gather(bot.read_back(channel, None), bot.read_back(channel, None))
+        await bot.read_back(channel, None)  # finished: may run again
+        await bot.close()
+
+    asyncio.run(run())
+    assert calls == [A, A]
