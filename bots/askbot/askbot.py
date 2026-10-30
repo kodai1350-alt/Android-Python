@@ -879,8 +879,8 @@ async def wiki_lookup(session, keywords):
 
 MAX_IMAGES = 2
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-BACKFILL_DAYS = 365
 DB_PATH = os.path.join(os.environ.get("HOME") or ".", "askbot-history.db")
+RECORDS_PATH = os.path.join(os.environ.get("HOME") or ".", "tsumugi.db")
 
 HELP_TEXT = (
     "メンションして質問してね。たとえば:\n"
@@ -979,6 +979,84 @@ def sources_footer(plan, wiki, rows):
     return ""
 
 
+_URL = re.compile(r"https?://\S+")
+
+
+def record_of(channel):
+    """(record_id, place_id, private): threads and forum posts belong to their parent's record."""
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id is not None:
+        return parent_id, channel.id, bool(channel.is_private())
+    return channel.id, channel.id, False
+
+
+def should_record(message):
+    """Only what people wrote: never bots (紬 included) or webhooks."""
+    return not message.author.bot and message.webhook_id is None
+
+
+def to_record(message):
+    """The message as a Msg, and its images as unclassified Photos."""
+    record_id, place_id, private = record_of(message.channel)
+    links = []
+    for item in [*_URL.findall(message.content)] + [
+            part for e in message.embeds for part in (e.url, e.title, e.description)]:
+        if item and item not in links:
+            links.append(item)
+    msg = Msg(message.id, message.guild.id, record_id, place_id, private, message.author.display_name,
+              message.clean_content, "\n".join(links), message.created_at)
+    photos = [
+        Photo(a.id, message.id, message.guild.id, record_id, place_id, private, message.author.display_name,
+              message.created_at)
+        for a in message.attachments if (a.content_type or "").startswith("image/")
+    ]
+    return msg, photos
+
+
+async def _threads(channel):
+    """The channel's threads: active ones, then archived public and (when readable) private ones."""
+    seen = set()
+    for t in list(getattr(channel, "threads", [])):
+        seen.add(t.id)
+        yield t
+    for private in (False, True):
+        try:
+            async for t in channel.archived_threads(limit=None, private=private):
+                if t.id not in seen:
+                    seen.add(t.id)
+                    yield t
+        except discord.HTTPException:
+            log.info("cannot list archived %s threads of %s", "private" if private else "public", channel.id)
+
+
+async def backfill(store, channel):
+    """Reads what the record is missing: each place (the channel, then its threads) from just after its
+    newest stored message, or from the start. Returns how many messages were stored. Raises
+    discord.Forbidden when the channel itself cannot be read; threads that cannot be read are skipped."""
+    record_id = channel.id
+    count = 0
+
+    async def read(place):
+        nonlocal count
+        async for m in place.history(limit=None, after=store.latest(place.id), oldest_first=True):
+            if not store.is_registered(record_id):
+                return False
+            if should_record(m):
+                store.upsert(*to_record(m))
+                count += 1
+        return True
+
+    if hasattr(channel, "history") and not await read(channel):
+        return count
+    async for thread in _threads(channel):
+        try:
+            if not await read(thread):
+                return count
+        except discord.Forbidden:
+            log.info("cannot read thread %s", thread.id)
+    return count
+
+
 def _to_stored(message):
     return Stored(message.id, message.guild.id, message.channel.id, message.author.display_name,
                   message.clean_content, message.created_at)
@@ -993,6 +1071,8 @@ class AskBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.queue = AskQueue()
         self.store = HistoryStore(DB_PATH)
+        self.records = RecordStore(RECORDS_PATH)
+        self.records.import_old(DB_PATH)
         self.llm_url = os.environ.get("LLM_URL")
         self.llm_key = os.environ.get("LLM_API_KEY")
         self.session = None
@@ -1018,69 +1098,74 @@ class AskBot(discord.Client):
         log.info("logged in as %s (LLM: %s)", self.user, "ready" if self.llm_url else "missing")
         # Catch up on messages posted while the bot was offline.
         for guild in self.guilds:
-            for channel_id in self.store.registered(guild.id):
-                channel = guild.get_channel(channel_id)
+            for record_id in self.records.registered(guild.id):
+                channel = guild.get_channel(record_id)
                 if channel is not None:
-                    self._spawn(self.backfill(channel, announce=False))
+                    self._spawn(self.read_back(channel, None))
 
     # --- recording ---
 
     def _add_commands(self):
-        @app_commands.command(name="記録する", description="このチャンネルの会話を記録して、あとで探せるようにします")
+        @app_commands.command(name="記録する", description="このチャンネルの会話と写真を記録して、あとで探せるようにします")
         @app_commands.guild_only()
         @app_commands.default_permissions(manage_channels=True)
         async def record(interaction: discord.Interaction):
-            self.store.register(interaction.guild_id, interaction.channel_id)
+            channel = interaction.channel
+            channel = getattr(channel, "parent", None) or channel  # in a thread: record its channel
+            self.records.register(interaction.guild_id, channel.id)
             await interaction.response.send_message(
-                f"記録を始めました。過去{BACKFILL_DAYS}日分を読み込みます（少し時間がかかります）。")
-            self._spawn(self.backfill(interaction.channel, announce=True))
+                "記録を始めました。過去の会話をさかのぼって読み込みます（多いと数十分かかります）。"
+                "写真の分類は、そのあと空き時間に少しずつ進めます。")
+            self._spawn(self.read_back(channel, interaction.channel))
 
         @app_commands.command(name="記録やめる", description="このチャンネルの記録をやめて、保存した分を消します")
         @app_commands.guild_only()
         @app_commands.default_permissions(manage_channels=True)
         async def stop_recording(interaction: discord.Interaction):
-            self.store.unregister(interaction.guild_id, interaction.channel_id)
+            record_id, _, _ = record_of(interaction.channel)
+            self.records.unregister(interaction.guild_id, record_id)
             await interaction.response.send_message("記録をやめて、保存していた分を消しました。")
 
         self.tree.add_command(record)
         self.tree.add_command(stop_recording)
 
-    async def backfill(self, channel, announce):
-        since = self.store.latest(channel.id) or datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
-        count = 0
+    async def read_back(self, channel, announce_to):
+        """backfill, telling `announce_to` (when given) how it went."""
         try:
-            async for m in channel.history(limit=None, after=since, oldest_first=True):
-                if not self.store.is_registered(channel.id):
-                    return
-                if not m.author.bot:
-                    self.store.upsert(_to_stored(m))
-                    count += 1
+            count = await backfill(self.records, channel)
         except discord.Forbidden:
-            if announce:
-                await channel.send("このチャンネルの履歴を読む権限がありません（「メッセージ履歴を読む」を許可してください）。")
+            if announce_to is not None:
+                await announce_to.send("このチャンネルの履歴を読む権限がありません（「メッセージ履歴を読む」を許可してください）。")
             return
-        if announce:
-            await channel.send(f"📚 過去の会話を{count}件読み込みました。")
+        except Exception:
+            log.exception("reading back %s failed", channel.id)
+            return
+        if announce_to is not None:
+            await announce_to.send(f"📚 過去の会話を{count}件読み込みました。")
+
+    def _record(self, message):
+        if message.guild and should_record(message) and self.records.is_registered(record_of(message.channel)[0]):
+            self.records.upsert(*to_record(message))
 
     async def on_message(self, message):
         if message.author.bot:
             return
-        if message.guild and self.store.is_registered(message.channel.id):
-            self.store.upsert(_to_stored(message))
+        self._record(message)
         if self.user in message.mentions:
             await self.handle_question(message)
 
     async def on_raw_message_edit(self, payload):
+        # Link previews usually arrive as an edit, so links are refreshed here too.
         m = getattr(payload, "message", None)
-        if m is not None and m.guild and not m.author.bot and self.store.is_registered(m.channel.id):
-            self.store.upsert(_to_stored(m))
+        if m is not None:
+            self._record(m)
 
     async def on_raw_message_delete(self, payload):
-        self.store.delete(payload.message_id)
+        self.records.delete_message(payload.message_id)
 
     async def on_raw_bulk_message_delete(self, payload):
         for message_id in payload.message_ids:
-            self.store.delete(message_id)
+            self.records.delete_message(message_id)
 
     # --- questions ---
 
