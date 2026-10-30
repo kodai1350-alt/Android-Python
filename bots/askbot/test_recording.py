@@ -142,3 +142,27 @@ def test_forum_without_history_reads_its_posts(tmp_path):
     post.messages = [message(1, post, "フォーラムの投稿")]
     forum = SimpleNamespace(id=A, threads=[post], archived_threads=Channel(A).archived_threads)
     assert asyncio.run(backfill(s, forum)) == 1
+
+
+def test_backfill_not_fooled_by_live_messages(tmp_path):
+    # A message posted (or edited) in a thread while backfill is still busy elsewhere must not
+    # make backfill skip the thread's older history.
+    s = store(tmp_path)
+    thread = Place(T, parent_id=A)
+    thread.messages = [message(10, thread, "古い", minutes=1), message(11, thread, "古い2", minutes=2)]
+    live = message(12, thread, "いま", minutes=60)
+    s.upsert(*to_record(live))
+    thread.messages.append(live)
+    channel = Channel(A, threads=[thread])
+    asyncio.run(backfill(s, channel))
+    assert s.stats(A).messages == 3
+
+
+def test_unregister_forgets_backfill_progress(tmp_path):
+    s = store(tmp_path)
+    channel = Channel(A)
+    channel.messages = [message(1, channel, "x")]
+    asyncio.run(backfill(s, channel))
+    s.unregister(G, A)
+    s.register(G, A)
+    assert asyncio.run(backfill(s, channel)) == 1

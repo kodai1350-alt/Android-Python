@@ -280,6 +280,7 @@ class RecordStats:
 _RECORD_SCHEMA = """
 CREATE TABLE IF NOT EXISTS records(record_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS backfill(place_id INTEGER PRIMARY KEY, record_id INTEGER NOT NULL, read_to REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS messages(
     message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, record_id INTEGER NOT NULL,
     place_id INTEGER NOT NULL, private INTEGER NOT NULL, author TEXT NOT NULL, content TEXT NOT NULL,
@@ -372,6 +373,7 @@ class RecordStore:
             self._db.execute("DELETE FROM records WHERE record_id = ? AND guild_id = ?", (record_id, guild_id))
             self._db.execute("DELETE FROM messages WHERE record_id = ?", (record_id,))
             self._db.execute("DELETE FROM photos WHERE record_id = ?", (record_id,))
+            self._db.execute("DELETE FROM backfill WHERE record_id = ?", (record_id,))
 
     def registered(self, guild_id):
         return {r[0] for r in self._db.execute("SELECT record_id FROM records WHERE guild_id = ?", (guild_id,))}
@@ -408,6 +410,18 @@ class RecordStore:
         with self._db:
             self._db.execute("DELETE FROM photos WHERE message_id = ?", (message_id,))
             self._db.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+
+    def read_to(self, place_id):
+        """How far backfill has read this place (live messages do not count), or None."""
+        row = self._db.execute("SELECT read_to FROM backfill WHERE place_id = ?", (place_id,)).fetchone()
+        return _ts(row[0]) if row else None
+
+    def mark_read(self, record_id, place_id, created_at):
+        with self._db:
+            self._db.execute(
+                "INSERT INTO backfill SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM records WHERE record_id = ?) "
+                "ON CONFLICT(place_id) DO UPDATE SET read_to = MAX(read_to, excluded.read_to)",
+                (place_id, record_id, created_at.timestamp(), record_id))
 
     def latest(self, place_id):
         row = self._db.execute("SELECT MAX(created_at) FROM messages WHERE place_id = ?", (place_id,)).fetchone()
@@ -1036,20 +1050,21 @@ async def _threads(channel):
 
 
 async def backfill(store, channel):
-    """Reads what the record is missing: each place (the channel, then its threads) from just after its
-    newest stored message, or from the start. Returns how many messages were stored. Raises
+    """Reads what the record is missing: each place (the channel, then its threads) from where backfill
+    last stopped there, or from the start. Messages stored live meanwhile do not move that point. Returns how many messages were stored. Raises
     discord.Forbidden when the channel itself cannot be read; threads that cannot be read are skipped."""
     record_id = channel.id
     count = 0
 
     async def read(place):
         nonlocal count
-        async for m in place.history(limit=None, after=store.latest(place.id), oldest_first=True):
+        async for m in place.history(limit=None, after=store.read_to(place.id), oldest_first=True):
             if not store.is_registered(record_id):
                 return False
             if should_record(m):
                 store.upsert(*to_record(m))
                 count += 1
+            store.mark_read(record_id, place.id, m.created_at)
         return True
 
     if hasattr(channel, "history") and not await read(channel):
