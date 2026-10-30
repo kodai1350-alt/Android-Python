@@ -114,12 +114,13 @@ class AskQueue:
     never interleaved and never cut short for the next person.
     """
 
-    def __init__(self, idle=None):
+    def __init__(self, idle=None, idle_backoff=60):
         self._waiting = []
         self._running_user = None
         self._wake = asyncio.Event()
         # Background work (photo classification) run while nobody is waiting; a question cancels it.
         self._idle = idle
+        self._idle_backoff = idle_backoff
 
     def busy_users(self):
         users = {user for user, _, _ in self._waiting}
@@ -167,6 +168,7 @@ class AskQueue:
         finally:
             for task in (idle, wake):
                 task.cancel()
+            failed = False
             for task in (idle, wake):
                 try:
                     await task
@@ -174,6 +176,13 @@ class AskQueue:
                     pass
                 except Exception:
                     log.exception("idle work failed")
+                    failed = True
+        if failed:
+            # Never spin on a failure that repeats; a question still ends the wait at once.
+            try:
+                await asyncio.wait_for(self._wake.wait(), self._idle_backoff)
+            except asyncio.TimeoutError:
+                pass
 
 
 # --- Questions: which kind, which words, which dates ------------------------

@@ -61,6 +61,31 @@ def test_submit_cancels_running_idle():
     asyncio.run(run())
 
 
+def test_failing_idle_backs_off_but_questions_still_run():
+    async def run():
+        calls, job_ran = [], asyncio.Event()
+
+        async def broken():
+            calls.append(1)
+            raise RuntimeError("unexpected")
+
+        async def job():
+            job_ran.set()
+
+        async def on_position(n):
+            pass
+
+        q = AskQueue(idle=broken, idle_backoff=60)
+        task = asyncio.create_task(q.run_forever())
+        await asyncio.sleep(0.2)
+        assert len(calls) == 1  # no tight loop
+        q.submit(7, job, on_position)
+        await asyncio.wait_for(job_ran.wait(), 1)
+        task.cancel()
+
+    asyncio.run(run())
+
+
 # --- PhotoClassifier ----------------------------------------------------------
 
 def setup(tmp_path):
