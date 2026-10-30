@@ -284,22 +284,20 @@ CREATE TABLE IF NOT EXISTS backfill(place_id INTEGER PRIMARY KEY, record_id INTE
 CREATE TABLE IF NOT EXISTS messages(
     message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, record_id INTEGER NOT NULL,
     place_id INTEGER NOT NULL, private INTEGER NOT NULL, author TEXT NOT NULL, content TEXT NOT NULL,
-    links TEXT NOT NULL, created_at REAL NOT NULL);
+    links TEXT NOT NULL, created_at REAL NOT NULL, norm TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_record ON messages(record_id, created_at);
 CREATE INDEX IF NOT EXISTS messages_by_place ON messages(place_id, created_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content, links, tokenize='trigram', content='messages', content_rowid='message_id');
+    norm, tokenize='trigram', content='messages', content_rowid='message_id');
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content, links) VALUES (new.message_id, new.content, new.links);
+    INSERT INTO messages_fts(rowid, norm) VALUES (new.message_id, new.norm);
 END;
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, links)
-        VALUES ('delete', old.message_id, old.content, old.links);
+    INSERT INTO messages_fts(messages_fts, rowid, norm) VALUES ('delete', old.message_id, old.norm);
 END;
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, links)
-        VALUES ('delete', old.message_id, old.content, old.links);
-    INSERT INTO messages_fts(rowid, content, links) VALUES (new.message_id, new.content, new.links);
+    INSERT INTO messages_fts(messages_fts, rowid, norm) VALUES ('delete', old.message_id, old.norm);
+    INSERT INTO messages_fts(rowid, norm) VALUES (new.message_id, new.norm);
 END;
 CREATE TABLE IF NOT EXISTS photos(
     attachment_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
@@ -333,6 +331,11 @@ _PHOTO_COLUMNS = ("attachment_id, message_id, guild_id, record_id, place_id, pri
                   "kind, description")
 
 
+def _norm(text):
+    """What search compares: NFKC folds full-width letters and digits (Ｅラーニング → Eラーニング)."""
+    return unicodedata.normalize("NFKC", text)
+
+
 def _ts(dt):
     return datetime.fromtimestamp(dt, timezone.utc)
 
@@ -342,6 +345,7 @@ def _word_filter(words, fts_table, rowid, text_sql):
 
     Words of 3+ characters use the trigram index; shorter ones (旅行, 猫) fall back to LIKE.
     """
+    words = list(dict.fromkeys(_norm(w) for w in words))
     hits, params = [], []
     long_words = [w for w in words if len(w) >= 3]
     if long_words:
@@ -387,11 +391,12 @@ class RecordStore:
         registered = "WHERE EXISTS (SELECT 1 FROM records WHERE record_id = ?)"
         with self._db:
             self._db.execute(
-                f"INSERT INTO messages SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? {registered} "
+                f"INSERT INTO messages({_MSG_COLUMNS}, norm) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? {registered} "
                 "ON CONFLICT(message_id) DO UPDATE SET author = excluded.author, content = excluded.content, "
-                "links = excluded.links",
+                "links = excluded.links, norm = excluded.norm",
                 (msg.message_id, msg.guild_id, msg.record_id, msg.place_id, int(msg.private), msg.author,
-                 msg.content, msg.links, msg.created_at.timestamp(), msg.record_id),
+                 msg.content, msg.links, msg.created_at.timestamp(), _norm(msg.content + " " + msg.links),
+                 msg.record_id),
             )
             keep = [p.attachment_id for p in photos]
             self._db.execute(
@@ -448,7 +453,7 @@ class RecordStore:
         score, score_params = "0", []
         if words:
             hit, hit_params, score, score_params = _word_filter(
-                words, "messages_fts", "message_id", "(content || ' ' || links)")
+                words, "messages_fts", "message_id", "norm")
             where.append(hit)
             params += hit_params
         rows = self._db.execute(
@@ -487,7 +492,7 @@ class RecordStore:
     def save_class(self, attachment_id, kind, description):
         with self._db:
             self._db.execute("UPDATE photos SET kind = ?, description = ? WHERE attachment_id = ?",
-                             (kind, description, attachment_id))
+                             (kind, _norm(description), attachment_id))
 
     def stats(self, record_id):
         n, first = self._db.execute(

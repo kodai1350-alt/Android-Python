@@ -176,3 +176,16 @@ def test_import_old_runs_only_once(tmp_path):
     s.unregister(G, B)  # /記録やめる must stick across restarts
     RecordStore(str(tmp_path / "tsumugi.db")).import_old(str(old))
     assert RecordStore(str(tmp_path / "tsumugi.db")).registered(G) == set()
+
+
+def test_full_width_and_half_width_find_each_other(tmp_path):
+    s = store(tmp_path)
+    s.upsert(msg(1, "Ｅラーニングの課題"), [])
+    s.upsert(msg(2, "", links="https://schoo.jp/ Eラーニング"), [])
+    assert sorted(ids(s.search_messages(A, A, ["Eラーニング"], None, None, False, 20))) == [1, 2]
+    assert sorted(ids(s.search_messages(A, A, ["Ｅラーニング"], None, None, False, 20))) == [1, 2]
+    assert ids(s.search_messages(A, A, ["ＵＲＬ"], None, None, False, 20)) == []
+    s.upsert(msg(3), [photo(31, 3)])
+    s.save_class(31, "スクショ", "ＵＲＬが写った画面")
+    assert ids(s.search_photos(A, A, ["URL"], None, None, None, 20)) == [31]
+    assert s.search_messages(A, A, ["Eラーニング"], None, None, False, 20)[0].content in ("Ｅラーニングの課題", "")
