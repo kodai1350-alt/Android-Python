@@ -15,8 +15,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
-import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -24,86 +23,6 @@ import discord
 from discord import app_commands
 
 log = logging.getLogger("askbot")
-
-# --- Replies: splitting and throttled edits ---------------------------------
-
-DISCORD_LIMIT = 2000
-EDIT_INTERVAL = 1.5
-
-_PROGRESS = {
-    "wiki": "📖 Wikipediaを読んでいます… {p}%",
-    # Photos sit at a low percent while the image is encoded, so say that a wait is normal.
-    "photo": "🖼 写真を見ています… {p}%（数分かかります）",
-    "history": "🔎 前の会話を読んでいます… {p}%",
-    "question": "💭 質問を読んでいます… {p}%",
-}
-
-
-def split_message(text, limit=DISCORD_LIMIT):
-    """Splits text into Discord-sized parts, at the last newline that fits when there is one."""
-    parts = []
-    while len(text) > limit:
-        cut = text.rfind("\n", 0, limit + 1)
-        if cut <= 0:
-            parts.append(text[:limit])
-            text = text[limit:]
-        else:
-            parts.append(text[:cut])
-            text = text[cut + 1:]
-    if text or not parts:
-        parts.append(text)
-    return parts
-
-
-def progress_text(kind, percent):
-    return _PROGRESS[kind].format(p=max(0, min(100, int(percent))))
-
-
-class ReplyWriter:
-    """Shows one answer by editing messages: a status line until text arrives, then the text.
-
-    Edits are at least `interval` seconds apart (Discord rate limits); `finish` always flushes.
-    Text past 2000 characters continues in new messages from `send_more`.
-    """
-
-    def __init__(self, first, send_more, *, interval=EDIT_INTERVAL, clock=time.monotonic):
-        self._messages = [first]
-        self._shown = [getattr(first, "content", None)]
-        self._send_more = send_more
-        self._interval = interval
-        self._clock = clock
-        self._last_edit = None
-        self._status = ""
-        self._text = ""
-
-    async def status(self, text):
-        self._status = text
-        await self._flush(force=False)
-
-    async def append(self, piece):
-        self._text += piece
-        await self._flush(force=False)
-
-    async def finish(self, footer=""):
-        await self._flush(force=True, footer=footer)
-
-    async def _flush(self, force, footer=""):
-        now = self._clock()
-        if not force and self._last_edit is not None and now - self._last_edit < self._interval:
-            return
-        body = self._text.strip() or self._status or "…"
-        if footer:
-            body += "\n\n" + footer
-        for i, part in enumerate(split_message(body)):
-            if i < len(self._messages):
-                if self._shown[i] != part:
-                    await self._messages[i].edit(content=part)
-                    self._shown[i] = part
-            else:
-                self._messages.append(await self._send_more(part))
-                self._shown.append(part)
-        self._last_edit = now
-
 
 # --- Queue: one question at a time -----------------------------------------
 
@@ -189,20 +108,11 @@ class AskQueue:
 
 JST = timezone(timedelta(hours=9))
 
-_HISTORY_WORDS = ("話した", "話してた", "言ってた", "会話", "だっけ", "前に", "この前", "さっきの")
 _STOP_WORDS = {"今日", "昨日", "先週", "今週", "先月", "今月", "去年", "何日", "何月", "写真", "画像", "名前", "何", "前"}
 # Runs of katakana, kanji (U+4E00–U+9FFF) or letters/digits: the nouns of a Japanese question, roughly.
 _KEYWORD = re.compile(r"[ァ-ヶー]{2,}|[一-鿿々]{2,}|[A-Za-z0-9]{2,}")
 _MONTH_DAY = re.compile(r"(\d{1,2})月(\d{1,2})日")
 _MONTH = re.compile(r"(\d{1,2})月")
-
-
-@dataclass
-class Plan:
-    mode: str  # "photo" | "history" | "wiki" | "chat"
-    keywords: list = field(default_factory=list)
-    since: datetime = None
-    until: datetime = None
 
 
 def _day(now, days_ago=0):
@@ -328,150 +238,6 @@ def extract_keywords(text):
     return words
 
 
-def plan_question(text, has_image, now):
-    text = unicodedata.normalize("NFKC", text)
-    span, where = _find_dates(text, now)
-    rest = text[:where[0]] + " " + text[where[1]:] if where else text
-    keywords = extract_keywords(rest)
-    since, until = span or (None, None)
-    if has_image:
-        mode = "photo"
-    elif span or any(w in text for w in _HISTORY_WORDS):
-        mode = "history"
-    elif keywords:
-        mode = "wiki"
-    else:
-        mode = "chat"
-    return Plan(mode, keywords, since, until)
-
-
-# --- History: messages of registered channels, searchable -------------------
-
-@dataclass
-class Stored:
-    message_id: int
-    guild_id: int
-    channel_id: int
-    author: str
-    content: str
-    created_at: datetime
-
-
-def jump_url(s):
-    return f"https://discord.com/channels/{s.guild_id}/{s.channel_id}/{s.message_id}"
-
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS channels(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS messages(
-    message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
-    author TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL);
-CREATE INDEX IF NOT EXISTS messages_by_channel ON messages(channel_id, created_at);
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content, tokenize='trigram', content='messages', content_rowid='message_id');
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.message_id, old.content);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.message_id, old.content);
-    INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
-END;
-"""
-
-
-def _like(word):
-    """A LIKE pattern matching `word` anywhere; '!' is the escape character (ESCAPE '!')."""
-    return "%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
-
-
-class HistoryStore:
-    """Messages of registered channels, kept in step with Discord (edits and deletes)."""
-
-    def __init__(self, path):
-        # Python Runner sets HOME to a folder it does not create.
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self._db = sqlite3.connect(path)
-        self._db.executescript(_SCHEMA)
-
-    def register(self, guild_id, channel_id):
-        with self._db:
-            self._db.execute("INSERT OR REPLACE INTO channels VALUES (?, ?)", (channel_id, guild_id))
-
-    def unregister(self, guild_id, channel_id):
-        with self._db:
-            self._db.execute("DELETE FROM channels WHERE channel_id = ? AND guild_id = ?", (channel_id, guild_id))
-            self._db.execute("DELETE FROM messages WHERE channel_id = ?", (channel_id,))
-
-    def registered(self, guild_id):
-        rows = self._db.execute("SELECT channel_id FROM channels WHERE guild_id = ?", (guild_id,))
-        return {r[0] for r in rows}
-
-    def is_registered(self, channel_id):
-        return self._db.execute("SELECT 1 FROM channels WHERE channel_id = ?", (channel_id,)).fetchone() is not None
-
-    def upsert(self, s):
-        """Stores or updates a message, but only while its channel is registered (checked in the same
-        statement, so a message cannot slip in after /記録やめる)."""
-        with self._db:
-            self._db.execute(
-                "INSERT INTO messages SELECT ?, ?, ?, ?, ?, ? "
-                "WHERE EXISTS (SELECT 1 FROM channels WHERE channel_id = ?) "
-                "ON CONFLICT(message_id) DO UPDATE SET author = excluded.author, content = excluded.content",
-                (s.message_id, s.guild_id, s.channel_id, s.author, s.content, s.created_at.timestamp(), s.channel_id),
-            )
-
-    def delete(self, message_id):
-        with self._db:
-            self._db.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
-
-    def latest(self, channel_id):
-        row = self._db.execute("SELECT MAX(created_at) FROM messages WHERE channel_id = ?", (channel_id,)).fetchone()
-        return datetime.fromtimestamp(row[0], timezone.utc) if row[0] is not None else None
-
-    def search(self, guild_id, channel_ids, keywords, since, until, limit=20):
-        """Messages in the given channels and dates, most keyword hits first, then newest first.
-
-        Words of 3+ characters use the trigram index; shorter ones (名前, 店) fall back to LIKE.
-        """
-        if not channel_ids:
-            return []
-        where = [f"guild_id = ? AND channel_id IN ({','.join('?' * len(channel_ids))})"]
-        params = [guild_id, *channel_ids]
-        if since is not None:
-            where.append("created_at >= ?")
-            params.append(since.timestamp())
-        if until is not None:
-            where.append("created_at < ?")
-            params.append(until.timestamp())
-        score = "0"
-        score_params = []
-        if keywords:
-            hits = []
-            long_words = [k for k in keywords if len(k) >= 3]
-            if long_words:
-                hits.append("message_id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
-                params.append(" OR ".join('"' + k.replace('"', '""') + '"' for k in long_words))
-            for k in keywords:
-                if len(k) < 3:
-                    hits.append("content LIKE ? ESCAPE '!'")
-                    params.append(_like(k))
-            where.append("(" + " OR ".join(hits) + ")")
-            score = " + ".join("(content LIKE ? ESCAPE '!')" for _ in keywords)
-            score_params = [_like(k) for k in keywords]
-        sql = (
-            f"SELECT message_id, guild_id, channel_id, author, content, created_at, {score} AS score "
-            f"FROM messages WHERE {' AND '.join(where)} ORDER BY score DESC, created_at DESC LIMIT ?"
-        )
-        rows = self._db.execute(sql, [*score_params, *params, limit])
-        return [
-            Stored(r[0], r[1], r[2], r[3], r[4], datetime.fromtimestamp(r[5], timezone.utc))
-            for r in rows
-        ]
-
-
 # --- Records: per channel (threads included), with links and photos ----------
 
 @dataclass
@@ -553,6 +319,11 @@ CREATE TRIGGER IF NOT EXISTS photos_au AFTER UPDATE ON photos BEGIN
     INSERT INTO photos_fts(rowid, kind, description) VALUES (new.attachment_id, new.kind, new.description);
 END;
 """
+
+def _like(word):
+    """A LIKE pattern matching `word` anywhere; '!' is the escape character (ESCAPE '!')."""
+    return "%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+
 
 _MSG_COLUMNS = "message_id, guild_id, record_id, place_id, private, author, content, links, created_at"
 _PHOTO_COLUMNS = ("attachment_id, message_id, guild_id, record_id, place_id, private, author, created_at, "
@@ -960,7 +731,6 @@ class PhotoClassifier:
             return
         self._store.save_class(photo.attachment_id, kind, description)
 
-MAX_ANSWER_TOKENS = 1500
 _CONTEXT_MESSAGE = "写真や資料が大きすぎて読み切れませんでした。写真を減らすか、質問を短くしてください。"
 _UNREACHABLE_MESSAGE = (
     "AIモデルにつながりません。アプリの「5. AIモデル」が準備完了になっているか確かめて、Botを起動し直してください。"
@@ -991,81 +761,6 @@ def progress_percent(p):
 def image_part(data, content_type):
     encoded = base64.b64encode(data).decode("ascii")
     return {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{encoded}"}}
-
-
-def _history_lines(rows):
-    lines = []
-    for r in sorted(rows, key=lambda r: r.created_at):
-        when = r.created_at.astimezone(JST).strftime("%Y-%m-%d %H:%M")
-        lines.append(f"[{when} {r.author}] {r.content}")
-    return "\n".join(lines)
-
-
-def build_messages(question, *, reply_text=None, images=(), wiki=None, history=None):
-    parts = []
-    if wiki:
-        title, _, text = wiki
-        parts.append(f"資料（Wikipedia「{title}」）:\n{text}")
-    if history is not None:
-        parts.append("資料（このサーバーの前の会話）:\n" + (_history_lines(history) or "（見つかりませんでした）"))
-    if reply_text:
-        parts.append(f"返信先のメッセージ:\n{reply_text}")
-    parts.append(f"質問: {question}")
-    text = "\n\n".join(parts)
-    content = [*images, {"type": "text", "text": text}] if images else text
-    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
-
-
-async def stream_answer(session, base_url, messages, on_progress, on_text, *, api_key=None, wait_seconds=120):
-    """Streams one answer. While llama-server is (re)starting it retries every 2 seconds,
-    calling on_progress(-1), for up to wait_seconds."""
-    body = {
-        "messages": messages, "stream": True, "return_progress": True, "max_tokens": MAX_ANSWER_TOKENS,
-        "temperature": 0.1, "top_k": 50, "top_p": 1.0, "min_p": 0.0, "repeat_penalty": 1.1,
-    }
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=900)
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        started = False
-        wrote = False
-        try:
-            async with session.post(base_url + "/v1/chat/completions", json=body, headers=headers,
-                                    timeout=timeout) as r:
-                if r.status == 503:
-                    raise _NotReady()
-                if r.status >= 400:
-                    raise LlmError(_server_error(await r.text(), r.status))
-                async for raw in r.content:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if line.startswith("error:"):
-                        raise LlmError(_server_error(line, None))
-                    event = parse_sse(line)
-                    if not event:
-                        continue
-                    started = True
-                    if "error" in event:
-                        raise LlmError(_server_error(json.dumps(event["error"], ensure_ascii=False), None))
-                    if "prompt_progress" in event:
-                        await on_progress(progress_percent(event["prompt_progress"]))
-                    for choice in event.get("choices") or []:
-                        piece = (choice.get("delta") or {}).get("content")
-                        if piece:
-                            wrote = True
-                            await on_text(piece)
-            if not wrote:
-                raise LlmError("AIモデルから答えが返ってきませんでした。もう一度聞いてください。")
-            return
-        except (aiohttp.ClientError, asyncio.TimeoutError, _NotReady) as e:
-            # A drop after reading began is reported, never retried: retrying would repeat the answer.
-            if started:
-                raise LlmError("答えている途中でAIモデルが止まりました。もう一度聞いてください。") from e
-            if not isinstance(e, (aiohttp.ClientConnectionError, _NotReady)):
-                raise LlmError("AIモデルとのやり取りに失敗しました。もう一度聞いてください。") from e
-            if time.monotonic() >= deadline:
-                raise LlmError(_UNREACHABLE_MESSAGE) from e
-            await on_progress(-1)
-            await asyncio.sleep(2)
 
 
 @dataclass
@@ -1142,64 +837,6 @@ def _server_error(detail, status):
     if "context" in detail:
         return _CONTEXT_MESSAGE
     return f"AIモデルがエラーを返しました（{status}）" if status else "AIモデルがエラーを返しました"
-
-
-# --- Wikipedia (free, no sign-up) --------------------------------------------
-
-WIKI_API = "https://ja.wikipedia.org/w/api.php"
-WIKI_MAX_CHARS = 3000
-# A hung network must not hold the whole queue.
-WIKI_TIMEOUT = 15
-USER_AGENT = "PythonRunner-askbot/1.0 (https://github.com/kodai1350-alt/Android-Python)"
-
-
-def pick_passages(text, keywords, max_chars=WIKI_MAX_CHARS):
-    """The lead paragraph, then paragraphs mentioning a keyword, then the rest, in the article's
-    order, up to max_chars. Detail first: the whole budget is used when the article has it."""
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip() and not p.strip().startswith("==")]
-    if not paragraphs:
-        return ""
-    chosen = {0}
-    used = len(paragraphs[0])
-    hits = [i for i, p in enumerate(paragraphs) if i and any(k in p for k in keywords)]
-    rest = [i for i in range(1, len(paragraphs)) if i not in hits]
-    for i in hits + rest:
-        if used + len(paragraphs[i]) > max_chars:
-            continue
-        chosen.add(i)
-        used += len(paragraphs[i])
-    return "\n".join(paragraphs[i] for i in sorted(chosen))
-
-
-async def _wiki_query(session, params):
-    """The API's "query" part; one retry when Wikipedia answers with an error (e.g. rate limits)."""
-    params = {**params, "action": "query", "format": "json", "formatversion": 2}
-    timeout = aiohttp.ClientTimeout(total=WIKI_TIMEOUT)
-    for attempt in range(2):
-        async with session.get(WIKI_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=timeout) as r:
-            data = await r.json(content_type=None)
-        if "query" in data:
-            return data["query"]
-        log.warning("Wikipedia answered without results: %s", data.get("error", data))
-        if attempt == 0:
-            await asyncio.sleep(1)
-    return None
-
-
-async def wiki_lookup(session, keywords):
-    """(title, url, passages) of the best-matching Japanese Wikipedia article, or None."""
-    try:
-        found = await _wiki_query(session, {"list": "search", "srsearch": " ".join(keywords), "srlimit": 1})
-        if not found or not found.get("search"):
-            return None
-        title = found["search"][0]["title"]
-        pages = await _wiki_query(session, {"prop": "extracts", "explaintext": 1, "redirects": 1, "titles": title})
-        text = pages["pages"][0].get("extract", "") if pages else ""
-    except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, IndexError, ValueError):
-        log.exception("Wikipedia lookup failed")
-        return None
-    url = "https://ja.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
-    return title, url, pick_passages(text, keywords)
 
 
 # --- Cards (Components V2) ------------------------------------------------------
@@ -1334,106 +971,15 @@ def record_card(place_name, stats):
 
 # --- Discord ------------------------------------------------------------------
 
-MAX_IMAGES = 2
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DB_PATH = os.path.join(os.environ.get("HOME") or ".", "askbot-history.db")
 RECORDS_PATH = os.path.join(os.environ.get("HOME") or ".", "tsumugi.db")
 
-HELP_TEXT = (
-    "メンションして質問してね。たとえば:\n"
-    "・写真に返信して「@ぼく これ何？」\n"
-    "・「@ぼく 量子コンピュータって何？」（Wikipediaで調べて答えます）\n"
-    "・「@ぼく 先週ラーメン屋の話したけど、どこだっけ？」（前の会話を探します）\n"
-    "前の会話を探せるようにするには、そのチャンネルで /記録する を実行してください。"
-)
 NO_MODEL_TEXT = "AIモデルが準備できていません（アプリの「5. AIモデル」でダウンロードしてから、Botを起動し直してください）"
-
-
-def readable_channels(guild, member, registered):
-    """Registered channels the asker may read: answers never quote a channel they cannot see."""
-    readable = set()
-    for channel_id in registered:
-        channel = guild.get_channel(channel_id)
-        if channel is None:
-            continue
-        perms = channel.permissions_for(member)
-        if perms.view_channel and perms.read_message_history:
-            readable.add(channel_id)
-    return readable
-
-
-def shareable_channels(guild, member, registered, answer_channel_id):
-    """Channels whose history may appear in an answer posted to `answer_channel_id`.
-
-    The answer is read by everyone in that channel, not just the asker, so a source must be readable
-    by the asker and be either the answering channel itself or a channel everyone can read.
-    """
-    shareable = set()
-    for channel_id in readable_channels(guild, member, registered):
-        if channel_id == answer_channel_id:
-            shareable.add(channel_id)
-            continue
-        perms = guild.get_channel(channel_id).permissions_for(guild.default_role)
-        if perms.view_channel and perms.read_message_history:
-            shareable.add(channel_id)
-    return shareable
-
-
-def image_refusal(parts, reason):
-    """The reason to refuse outright when photos were sent but none could be read."""
-    return reason if reason and not parts else None
-
-
-def fallback_plan(plan, question):
-    """A history question found nothing: if only a date made it one ("1月1日は何の日？"), answer it
-    as an ordinary question instead. None when the person clearly meant past conversations."""
-    if plan.mode != "history" or any(w in unicodedata.normalize("NFKC", question) for w in _HISTORY_WORDS):
-        return None
-    return Plan("wiki" if plan.keywords else "chat", plan.keywords)
-
-
-async def verify_rows(rows, fetch, store):
-    """Rows as they are on Discord now: deleted ones are dropped (and removed from the store), edited
-    ones updated. Catches changes made while the bot was offline. `fetch(row)` returns the current
-    text, or None when the message is gone."""
-    current = []
-    for row in rows:
-        text = await fetch(row)
-        if text is None:
-            store.delete(row.message_id)
-        elif text != row.content:
-            row = Stored(row.message_id, row.guild_id, row.channel_id, row.author, text, row.created_at)
-            store.upsert(row)
-            current.append(row)
-        else:
-            current.append(row)
-    return current
-
-
-async def collect_images(messages):
-    """Image parts from the messages' attachments (at most MAX_IMAGES), and why any were skipped."""
-    parts, reasons = [], []
-    for m in messages:
-        for a in m.attachments:
-            content_type = (a.content_type or "").split(";")[0]
-            if not content_type.startswith("image/"):
-                continue
-            if a.size > MAX_IMAGE_BYTES:
-                reasons.append("写真が大きすぎます（8MBまで）")
-            elif len(parts) >= MAX_IMAGES:
-                reasons.append(f"写真は最初の{MAX_IMAGES}枚だけ見ます")
-            else:
-                parts.append(image_part(await a.read(), content_type))
-    reasons = list(dict.fromkeys(reasons))
-    return parts, ("・".join(reasons) if reasons else None)
-
-
-def sources_footer(plan, wiki, rows):
-    if plan.mode == "wiki" and wiki:
-        return f"📚 参考: <{wiki[1]}>"
-    if plan.mode == "history" and rows:
-        return "\n".join(f"🔗 <{jump_url(r)}>" for r in rows[:5])
-    return ""
+NOT_RECORDED_TEXT = "このチャンネルは記録していません。/記録する で始められます"
+SEARCHING_TEXT = "🔎 探しています…"
+FAILED_TEXT = "⚠ うまく探せませんでした。もう一度聞いてください。"
+VIEW_TIMEOUT = 900
 
 
 _URL = re.compile(r"https?://\S+")
@@ -1514,9 +1060,173 @@ async def backfill(store, channel):
     return count
 
 
-def _to_stored(message):
-    return Stored(message.id, message.guild.id, message.channel.id, message.author.display_name,
-                  message.clean_content, message.created_at)
+# --- Searching -------------------------------------------------------------------
+
+async def verify_items(items, fetch_message, store):
+    """Items as they are on Discord now: deleted ones dropped (and forgotten), edited ones updated, and
+    for photos a fresh image URL (old attachment URLs expire). Catches changes made while the bot was
+    offline. When Discord cannot be asked right now, the item is kept as stored."""
+    kept, thumbs = [], {}
+    for item in items:
+        try:
+            message = await fetch_message(item)
+        except discord.HTTPException:
+            kept.append(item)
+            continue
+        if message is None:
+            store.delete_message(item.message_id)
+            continue
+        msg, photos = to_record(message)
+        store.upsert(msg, photos)
+        if isinstance(item, Photo):
+            image = next((a for a in message.attachments if a.id == item.attachment_id), None)
+            if image is not None:  # else removed by an edit (upsert forgot it)
+                thumbs[item.attachment_id] = image.url
+                kept.append(item)
+        else:
+            kept.append(replace(item, content=msg.content, links=msg.links))
+    return kept, thumbs
+
+
+async def run_search(query, store, record_id, place_id, verify, check):
+    """Candidates from the record, as they are now on Discord, kept only if the model agrees."""
+    if query.kind == "photo":
+        items = store.search_photos(record_id, place_id, query.words, query.photo_kind, query.since, query.until,
+                                    MAX_CANDIDATES)
+    else:
+        items = store.search_messages(record_id, place_id, query.words, query.since, query.until,
+                                      query.kind == "link", MAX_CANDIDATES)
+    items, thumbs = await verify(items)
+    if not items:
+        return SearchResult([], True, {})
+    items, checked = await check(items)
+    return SearchResult(items, checked, thumbs)
+
+
+def search_title(query):
+    """A heading such as "Eラーニングの話・半年前ぐらい"."""
+    words = "、".join(query.words[:2])
+    what = {"photo": "の写真", "link": "のURL"}.get(query.kind, "の話")
+    title = (words + what) if words else what[1:]
+    if query.photo_kind:
+        title += f"（{query.photo_kind}）"
+    return f"{title}・{query.when_text}" if query.when_text else title
+
+
+def without_controls(view):
+    """The card with its buttons and menus removed (link buttons stay): for when they stop working."""
+    for container in view.children:
+        for child in list(getattr(container, "children", [])):
+            if isinstance(child, discord.ui.ActionRow) and any(
+                    getattr(c, "custom_id", None) and not getattr(c, "url", None) for c in child.children):
+                container.remove_item(child)
+    return view
+
+
+class Search:
+    """One person's search, from understanding the request to the result card and its buttons."""
+
+    def __init__(self, bot, message, question, record_id, place_id, place_name):
+        self.bot = bot
+        self.message = message  # 紬's reply, edited as the search goes on
+        self.question = question
+        self.record_id = record_id
+        self.place_id = place_id
+        self.place_name = place_name
+        self.query = None
+        self.result = None
+        self.page = 0
+        self.view = None
+
+    async def _show(self, view):
+        if self.view is not None:
+            self.view.stop()  # an old card must not time out over the new one
+        self.view = view
+        await self.message.edit(view=view)
+
+    async def start(self):
+        try:
+            self.query = await understand(self.bot.session, self.bot.llm_url, self.question, datetime.now(JST),
+                                          api_key=self.bot.llm_key)
+        except LlmError as e:
+            await self._show(status_card(f"⚠ {e}"))
+            return
+        if self.query.kind == "other":
+            await self._show(help_card())
+            return
+        await self.run()
+
+    async def run(self):
+        try:
+            await self._show(status_card(SEARCHING_TEXT))
+
+            async def on_progress(done, total):
+                await self.message.edit(view=status_card(f"🔎 {total}件の候補を確かめています…"))
+
+            async def check(items):
+                return await check_candidates(self.bot.session, self.bot.llm_url, self.question, items,
+                                              api_key=self.bot.llm_key, on_progress=on_progress)
+
+            self.result = await run_search(self.query, self.bot.records, self.record_id, self.place_id,
+                                           self.bot._verify, check)
+            self.page = 0
+            await self._show(self._card())
+        except Exception:
+            log.exception("search failed")
+            await self._show(status_card(FAILED_TEXT))
+
+    def _build(self):
+        if not self.result.items:
+            return not_found_card(self.query, self.place_name)
+        return results_card(self.query, search_title(self.query), self.place_name, self.result, self.page)
+
+    def _card(self):
+        """The card with its buttons wired; after VIEW_TIMEOUT they are taken off the message."""
+        view = self._build()
+        for item in view.walk_children():
+            callback = {"more": self.on_more, "kind": self.on_kind, "widen": self.on_widen}.get(
+                getattr(item, "custom_id", None))
+            if callback is not None:
+                item.callback = callback
+        view.timeout = VIEW_TIMEOUT
+        view.on_timeout = lambda: self.message.edit(view=without_controls(self._build()))
+        return view
+
+    async def on_more(self, interaction):
+        self.page += 1
+        view = self._card()
+        if self.view is not None:
+            self.view.stop()
+        self.view = view
+        await interaction.response.edit_message(view=view)
+
+    async def on_kind(self, interaction):
+        self.query = replace(self.query, photo_kind=interaction.data["values"][0])
+        await self._again(interaction)
+
+    async def on_widen(self, interaction):
+        since, until = self.query.since, self.query.until
+        if since is not None and until is not None:
+            half = (until - since) / 2
+            since, until = since - half, until + half
+        self.query = replace(self.query, since=since, until=until)
+        await self._again(interaction)
+
+    async def _again(self, interaction):
+        """Searches again through the queue: checking candidates takes the phone a while."""
+
+        async def on_position(n):
+            await self.message.edit(view=status_card(f"順番待ち {n}番目です"))
+
+        position = self.bot.queue.submit(interaction.user.id, self.run, on_position)
+        if position is None:
+            await interaction.response.send_message("前の質問が終わるまで待ってね", ephemeral=True)
+            return
+        if self.view is not None:
+            self.view.stop()
+        self.view = None
+        text = f"順番待ち {position}番目です" if position else SEARCHING_TEXT
+        await interaction.response.edit_message(view=status_card(text))
 
 
 class AskBot(discord.Client):
@@ -1526,7 +1236,6 @@ class AskBot(discord.Client):
         # Answers quote the model and other people's messages: never let them ping anyone.
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.tree = app_commands.CommandTree(self)
-        self.store = HistoryStore(DB_PATH)
         self.records = RecordStore(RECORDS_PATH)
         self.records.import_old(DB_PATH)
         self.llm_url = os.environ.get("LLM_URL")
@@ -1601,11 +1310,22 @@ class AskBot(discord.Client):
         async def stop_recording(interaction: discord.Interaction):
             record_id, _, _ = record_of(interaction.channel)
             self.records.unregister(interaction.guild_id, record_id)
-            self.store.unregister(interaction.guild_id, record_id)  # the old store, until it is removed
             await interaction.response.send_message("記録をやめて、保存していた分を消しました。")
+
+        @app_commands.command(name="記録の様子", description="このチャンネルの記録と、写真の分類がどこまで進んだかを見ます")
+        @app_commands.guild_only()
+        @app_commands.default_permissions(manage_channels=True)
+        async def record_status(interaction: discord.Interaction):
+            channel = interaction.channel
+            channel = getattr(channel, "parent", None) or channel
+            if not self.records.is_registered(channel.id):
+                await interaction.response.send_message(view=status_card(NOT_RECORDED_TEXT))
+                return
+            await interaction.response.send_message(view=record_card(channel.name, self.records.stats(channel.id)))
 
         self.tree.add_command(record)
         self.tree.add_command(stop_recording)
+        self.tree.add_command(record_status)
 
     async def read_back(self, channel, announce_to):
         """backfill, telling `announce_to` (when given) how it went."""
@@ -1640,116 +1360,53 @@ class AskBot(discord.Client):
 
     async def on_raw_message_delete(self, payload):
         self.records.delete_message(payload.message_id)
-        self.store.delete(payload.message_id)
 
     async def on_raw_bulk_message_delete(self, payload):
         for message_id in payload.message_ids:
             self.records.delete_message(message_id)
-            self.store.delete(message_id)
 
     # --- questions ---
+
+    async def _fetch_message(self, item):
+        """The item's message as it is on Discord now, or None when it was deleted."""
+        channel = self.get_channel(item.place_id)
+        try:
+            if channel is None:
+                channel = await self.fetch_channel(item.place_id)
+            return await channel.fetch_message(item.message_id)
+        except discord.NotFound:
+            return None
+
+    async def _verify(self, items):
+        return await verify_items(items, self._fetch_message, self.records)
 
     async def handle_question(self, message):
         text = message.content
         for mention in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
             text = text.replace(mention, "")
         text = text.strip()
-        replying = bool(message.reference and message.reference.message_id)
-        if not text and not message.attachments and not replying:
-            await message.reply(HELP_TEXT, mention_author=False)
+        if not message.guild or not text:
+            await message.reply(view=help_card(), mention_author=False)
             return
-        # Acknowledge first: downloading photos can take a while on mobile data.
-        first = await message.reply("受け付けました", mention_author=False)
+        record_id, place_id, _ = record_of(message.channel)
+        if not self.records.is_registered(record_id):
+            await message.reply(view=status_card(NOT_RECORDED_TEXT), mention_author=False)
+            return
+        first = await message.reply(view=status_card(SEARCHING_TEXT), mention_author=False)
         if not self.llm_url:
-            await first.edit(content=NO_MODEL_TEXT)
+            await first.edit(view=status_card(NO_MODEL_TEXT))
             return
-        reply_to = None
-        if replying:
-            reply_to = message.reference.resolved
-            if not isinstance(reply_to, discord.Message):
-                try:
-                    reply_to = await message.channel.fetch_message(message.reference.message_id)
-                except discord.HTTPException:
-                    reply_to = None
-        images, image_note = await collect_images([message] + ([reply_to] if reply_to else []))
-        refusal = image_refusal(images, image_note)
-        if refusal:
-            await first.edit(content=f"{refusal}。写真を小さくしてから、もう一度聞いてください。")
-            return
-        question = text or "これについて教えて"
-        plan = plan_question(question, bool(images), datetime.now(JST))
-        writer = ReplyWriter(first, message.channel.send)
-
-        async def job():
-            try:
-                await self.answer(message, question, reply_to, images, image_note, plan, writer)
-            except Exception:
-                log.exception("answer failed")
-                await writer.append("\n\n⚠ うまく答えられませんでした。もう一度聞いてください。")
-                await writer.finish()
+        parent = getattr(message.channel, "parent", None) or message.channel
+        search = Search(self, first, text, record_id, place_id, parent.name)
 
         async def on_position(n):
-            await first.edit(content=f"順番待ち {n}番目です")
+            await first.edit(view=status_card(f"順番待ち {n}番目です"))
 
-        position = self.queue.submit(message.author.id, job, on_position)
+        position = self.queue.submit(message.author.id, search.start, on_position)
         if position is None:
-            await first.edit(content="前の質問が終わるまで待ってね")
+            await first.edit(view=status_card("前の質問が終わるまで待ってね"))
         elif position > 0:
             await on_position(position)
-
-    async def _current_text(self, row):
-        channel = self.get_channel(row.channel_id)
-        if channel is None:
-            return None
-        try:
-            return (await channel.fetch_message(row.message_id)).clean_content
-        except discord.NotFound:
-            return None
-        except discord.HTTPException:
-            return row.content
-
-    async def answer(self, message, question, reply_to, images, image_note, plan, writer):
-        notes = [image_note] if image_note else []
-        wiki = rows = None
-        if plan.mode == "history":
-            await writer.status("🔎 前の会話を探しています…")
-            channels = set()
-            if message.guild:
-                registered = self.store.registered(message.guild.id)
-                channels = shareable_channels(message.guild, message.author, registered, message.channel.id)
-            if channels:
-                rows = self.store.search(message.guild.id, channels, plan.keywords, plan.since, plan.until)
-                rows = await verify_rows(rows, self._current_text, self.store)
-            if not rows:
-                fallback = fallback_plan(plan, question)
-                if fallback is None:
-                    await writer.append(
-                        "前の会話から見つかりませんでした。言葉や日付を変えて聞いてみてください。" if channels else
-                        "ここから探せる記録がありません。探したいチャンネルで /記録する をしてください。")
-                    await writer.finish()
-                    return
-                plan, rows = fallback, None
-        if plan.mode == "wiki":
-            await writer.status("📖 Wikipediaで調べています…")
-            wiki = await wiki_lookup(self.session, plan.keywords)
-            if wiki is None:
-                notes.append("Wikipediaに記事が見つかりませんでした")
-
-        messages = build_messages(
-            question, reply_text=reply_to.clean_content if reply_to else None,
-            images=images, wiki=wiki, history=rows,
-        )
-        kind = plan.mode if plan.mode in ("photo", "history", "wiki") else "question"
-
-        async def on_progress(percent):
-            await writer.status("⏳ AIモデルを起動中…" if percent < 0 else progress_text(kind, percent))
-
-        try:
-            await stream_answer(self.session, self.llm_url, messages, on_progress, writer.append, api_key=self.llm_key)
-        except LlmError as e:
-            await writer.append(f"\n\n⚠ {e}")
-        footer = "\n".join(filter(None, [sources_footer(plan, wiki, rows), *(f"※ {n}" for n in notes)]))
-        await writer.finish(footer)
 
 
 def main():
