@@ -1,4 +1,6 @@
-"""askbot: a Discord bot that answers @mentions with the LLM running on this phone.
+"""askbot (紬): a Discord bot that finds past messages, links and photos when @mentioned.
+
+The LLM on this phone reads the request and checks the candidates; photos are classified in idle time.
 
 Run it in Python Runner. It needs:
   - TOKEN        the Discord bot token (アプリの「秘密の値」)
@@ -978,6 +980,7 @@ RECORDS_PATH = os.path.join(os.environ.get("HOME") or ".", "tsumugi.db")
 NO_MODEL_TEXT = "AIモデルが準備できていません（アプリの「5. AIモデル」でダウンロードしてから、Botを起動し直してください）"
 NOT_RECORDED_TEXT = "このチャンネルは記録していません。/記録する で始められます"
 SEARCHING_TEXT = "🔎 探しています…"
+NO_HISTORY_TEXT = "このチャンネルの履歴を読む権限がないので、探せません"
 FAILED_TEXT = "⚠ うまく探せませんでした。もう一度聞いてください。"
 VIEW_TIMEOUT = 900
 
@@ -1062,6 +1065,12 @@ async def backfill(store, channel):
 
 # --- Searching -------------------------------------------------------------------
 
+def can_read_history(channel, member):
+    """Whether `member` may read this channel's past messages: 紬 must not show them anything more."""
+    perms = channel.permissions_for(member)
+    return perms.view_channel and perms.read_message_history
+
+
 async def verify_items(items, fetch_message, store):
     """Items as they are on Discord now: deleted ones dropped (and forgotten), edited ones updated, and
     for photos a fresh image URL (old attachment URLs expire). Catches changes made while the bot was
@@ -1126,8 +1135,9 @@ def without_controls(view):
 class Search:
     """One person's search, from understanding the request to the result card and its buttons."""
 
-    def __init__(self, bot, message, question, record_id, place_id, place_name):
+    def __init__(self, bot, message, question, record_id, place_id, place_name, channel):
         self.bot = bot
+        self.channel = channel  # where it was asked: whoever presses a button must be able to read it
         self.message = message  # 紬's reply, edited as the search goes on
         self.question = question
         self.record_id = record_id
@@ -1192,7 +1202,15 @@ class Search:
         view.on_timeout = lambda: self.message.edit(view=without_controls(self._build()))
         return view
 
+    async def _allowed(self, interaction):
+        if can_read_history(self.channel, interaction.user):
+            return True
+        await interaction.response.send_message(NO_HISTORY_TEXT, ephemeral=True)
+        return False
+
     async def on_more(self, interaction):
+        if not await self._allowed(interaction):
+            return
         self.page += 1
         view = self._card()
         if self.view is not None:
@@ -1201,10 +1219,14 @@ class Search:
         await interaction.response.edit_message(view=view)
 
     async def on_kind(self, interaction):
+        if not await self._allowed(interaction):
+            return
         self.query = replace(self.query, photo_kind=interaction.data["values"][0])
         await self._again(interaction)
 
     async def on_widen(self, interaction):
+        if not await self._allowed(interaction):
+            return
         since, until = self.query.since, self.query.until
         if since is not None and until is not None:
             half = (until - since) / 2
@@ -1392,12 +1414,15 @@ class AskBot(discord.Client):
         if not self.records.is_registered(record_id):
             await message.reply(view=status_card(NOT_RECORDED_TEXT), mention_author=False)
             return
+        if not can_read_history(message.channel, message.author):
+            await message.reply(view=status_card(NO_HISTORY_TEXT), mention_author=False)
+            return
         first = await message.reply(view=status_card(SEARCHING_TEXT), mention_author=False)
         if not self.llm_url:
             await first.edit(view=status_card(NO_MODEL_TEXT))
             return
         parent = getattr(message.channel, "parent", None) or message.channel
-        search = Search(self, first, text, record_id, place_id, parent.name)
+        search = Search(self, first, text, record_id, place_id, parent.name, message.channel)
 
         async def on_position(n):
             await first.edit(view=status_card(f"順番待ち {n}番目です"))

@@ -147,6 +147,13 @@ class Sent:
         return [c.content for c in self.views[-1].walk_children() if isinstance(c, discord.ui.TextDisplay)]
 
 
+def readable(**kw):
+    """A fake channel the asker may read (history included unless history=False)."""
+    history = kw.pop("history", True)
+    perms = SimpleNamespace(view_channel=True, read_message_history=history)
+    return SimpleNamespace(permissions_for=lambda member: perms, **kw)
+
+
 def mention(text, channel):
     sent = []
 
@@ -185,7 +192,7 @@ def ask(bot, message, sent):
 
 def test_unregistered_channel_says_how_to_start(tmp_path, monkeypatch):
     bot = make_bot(tmp_path, monkeypatch)
-    message, sent = mention("旅行の話", SimpleNamespace(id=A, name="雑談"))
+    message, sent = mention("旅行の話", readable(id=A, name="雑談"))
     assert ask(bot, message, sent) == ["このチャンネルは記録していません。/記録する で始められます"]
 
 
@@ -197,7 +204,7 @@ def test_other_kind_shows_help(tmp_path, monkeypatch):
         return Query("other", [], None, None)
 
     monkeypatch.setattr(askbot, "understand", understand)
-    message, sent = mention("おはよう", SimpleNamespace(id=A, name="雑談"))
+    message, sent = mention("おはよう", readable(id=A, name="雑談"))
     assert any("紬は探しもの専門です" in t for t in ask(bot, message, sent))
 
 
@@ -218,9 +225,17 @@ def test_question_in_thread_searches_parent_record(tmp_path, monkeypatch):
     monkeypatch.setattr(askbot, "understand", understand)
     monkeypatch.setattr(askbot, "check_candidates", check)
     bot._verify = verify
-    thread = SimpleNamespace(id=T, name="旅行スレ", parent_id=A, parent=SimpleNamespace(id=A, name="雑談"),
-                             is_private=lambda: False)
+    thread = readable(id=T, name="旅行スレ", parent_id=A, parent=SimpleNamespace(id=A, name="雑談"),
+                      is_private=lambda: False)
     message, sent = mention("旅行の話", thread)
     texts = ask(bot, message, sent)
     assert texts[1].startswith("-# #雑談 の記録から")
     assert any("旅行の日程" in t for t in texts)
+
+
+def test_asker_without_history_permission_is_refused(tmp_path, monkeypatch):
+    bot = make_bot(tmp_path, monkeypatch)
+    bot.records.register(G, A)
+    message, sent = mention("旅行の話", readable(id=A, name="雑談", history=False))
+    assert ask(bot, message, sent) == ["このチャンネルの履歴を読む権限がないので、探せません"]
+    assert bot.queue.busy_users() == set()
