@@ -688,6 +688,9 @@ CLASS_PROMPT = (
     "写真に文字が写っていれば、その文字も説明に入れてください。"
 )
 IDLE_SLEEP = 60
+# What llama.cpp can decode on the phone (stb_image); WebP, HEIC and AVIF are not.
+READABLE_IMAGES = ("image/jpeg", "image/png", "image/gif", "image/bmp")
+MAX_TRIES = 3
 
 
 async def classify(session, base_url, data, content_type, *, api_key=None):
@@ -721,6 +724,7 @@ class PhotoClassifier:
         self._fetch = fetch_image
         self._classify = classify  # (bytes, content_type) -> (kind, description)
         self._sleep = sleep
+        self._failures = {}  # attachment_id -> times the model failed on it
 
     async def run_once(self):
         photo = self._store.next_unclassified()
@@ -736,13 +740,30 @@ class PhotoClassifier:
             if data is None or len(data) > MAX_IMAGE_BYTES:
                 self._store.save_class(photo.attachment_id, "その他", "（大きすぎて見られませんでした）")
                 return
+            if content_type not in READABLE_IMAGES:
+                self._store.save_class(photo.attachment_id, "その他", "（この形式の写真は見られませんでした）")
+                return
             kind, description = await self._classify(data, content_type)
         except discord.Forbidden:
             # Never readable again: do not let it block every photo behind it.
             self._store.save_class(photo.attachment_id, "その他", "（見られませんでした）")
             return
-        except (LlmError, discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError):
-            log.exception("could not classify photo %s; trying again later", photo.attachment_id)
+        except LlmUnreachable:
+            await self._sleep(IDLE_SLEEP)  # the model is down, not this photo's fault
+            return
+        except LlmError:
+            # The model failed on this photo: after a few tries, give up so the photos behind it move on.
+            tries = self._failures.get(photo.attachment_id, 0) + 1
+            log.exception("could not classify photo %s (try %d)", photo.attachment_id, tries)
+            if tries >= MAX_TRIES:
+                self._failures.pop(photo.attachment_id, None)
+                self._store.save_class(photo.attachment_id, "その他", "（見られませんでした）")
+                return
+            self._failures[photo.attachment_id] = tries
+            await self._sleep(IDLE_SLEEP)
+            return
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError):
+            log.exception("could not fetch photo %s; trying again later", photo.attachment_id)
             await self._sleep(IDLE_SLEEP)
             return
         self._store.save_class(photo.attachment_id, kind, description)
@@ -755,6 +776,10 @@ _UNREACHABLE_MESSAGE = (
 
 class LlmError(Exception):
     """An error whose message is shown to the person who asked, as is."""
+
+
+class LlmUnreachable(LlmError):
+    """llama-server did not answer at all (starting up or stopped): worth retrying later."""
 
 
 class _NotReady(Exception):
@@ -834,7 +859,7 @@ async def llm_call(session, base_url, body, *, api_key=None, on_progress=None, w
             if not isinstance(e, (aiohttp.ClientConnectionError, _NotReady)):
                 raise LlmError("AIモデルとのやり取りに失敗しました。もう一度聞いてください。") from e
             if time.monotonic() >= deadline:
-                raise LlmError(_UNREACHABLE_MESSAGE) from e
+                raise LlmUnreachable(_UNREACHABLE_MESSAGE) from e
             await progress(-1)
             await asyncio.sleep(2)
             continue

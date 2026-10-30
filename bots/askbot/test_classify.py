@@ -6,7 +6,8 @@ import discord
 from aiohttp import ClientSession, web
 from types import SimpleNamespace
 
-from askbot import (CLASS_SCHEMA, JST, AskQueue, LlmError, Msg, Photo, PhotoClassifier, RecordStore, classify)
+from askbot import (CLASS_SCHEMA, JST, AskQueue, LlmError, LlmUnreachable, Msg, Photo, PhotoClassifier,
+                    RecordStore, classify)
 from test_llm import free_port, start_app
 
 G, A = 1, 100
@@ -151,11 +152,52 @@ def test_llm_error_keeps_photo_pending_and_sleeps_60(tmp_path):
     sleeps = Sleeps()
 
     async def failing(data, content_type):
-        raise LlmError("AIモデルにつながりません")
+        raise LlmUnreachable("AIモデルにつながりません")
 
     asyncio.run(classifier(s, cls=failing, sleep=sleeps).run_once())
     assert s.next_unclassified().attachment_id == 11
     assert sleeps.calls == [60]
+
+
+def test_llm_down_never_gives_up_on_a_photo(tmp_path):
+    s = setup(tmp_path)
+
+    async def down(data, content_type):
+        raise LlmUnreachable("AIモデルにつながりません")
+
+    c = classifier(s, cls=down)
+    for _ in range(5):
+        asyncio.run(c.run_once())
+    assert s.next_unclassified().attachment_id == 11
+
+
+def test_model_rejecting_photo_gives_up_after_3(tmp_path):
+    s = setup(tmp_path)
+
+    async def rejected(data, content_type):
+        raise LlmError("AIモデルがエラーを返しました（400）")
+
+    c = classifier(s, cls=rejected)
+    for _ in range(2):
+        asyncio.run(c.run_once())
+    assert s.next_unclassified().attachment_id == 11
+    asyncio.run(c.run_once())
+    assert s.next_unclassified() is None
+
+
+def test_unsupported_format_marked_without_model(tmp_path):
+    s = setup(tmp_path)
+    used = []
+
+    async def webp(photo):
+        return b"riff", "image/webp"
+
+    async def cls(data, content_type):
+        used.append(1)
+        return "料理", "x"
+
+    asyncio.run(classifier(s, fetch=webp, cls=cls).run_once())
+    assert used == [] and s.next_unclassified() is None
 
 
 def test_discord_trouble_keeps_photo_pending(tmp_path):
