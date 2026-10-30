@@ -64,3 +64,10 @@ def test_request_body_has_tool_and_fixed_prefix():
     assert body["messages"][1] == {"role": "user", "content": "猫の写真"}
     assert body["tools"] == [SEARCH_TOOL]
     assert body["tool_choice"] == "required"
+
+
+def test_understand_ignores_malformed_tool_args():
+    q = run("旅行の日程の話", ["not", "a", "dict"])
+    assert (q.kind, q.words) == ("message", ["旅行", "日程"])
+    q = run("旅行の日程の話", {"kind": "message", "words": "旅行"})
+    assert q.words == ["旅行", "日程"]

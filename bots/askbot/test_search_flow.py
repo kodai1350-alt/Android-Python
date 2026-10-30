@@ -292,3 +292,15 @@ def test_read_back_runs_once_per_channel_at_a_time(tmp_path, monkeypatch):
 
     asyncio.run(run())
     assert calls == [A, A]
+
+
+def test_unexpected_error_shows_failed_card(tmp_path, monkeypatch):
+    bot = make_bot(tmp_path, monkeypatch)
+    bot.records.register(G, A)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(askbot, "understand", broken)
+    message, sent = mention("旅行の話", readable(id=A, name="雑談"))
+    assert ask(bot, message, sent) == [askbot.FAILED_TEXT]

@@ -603,12 +603,15 @@ async def understand(session, base_url, question, now, *, api_key=None):
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": question}],
         "tools": [SEARCH_TOOL], "tool_choice": "required", "temperature": 0.1, "max_tokens": 200,
     }
-    args = (await llm_call(session, base_url, body, api_key=api_key)).tool_args or {}
+    args = (await llm_call(session, base_url, body, api_key=api_key)).tool_args
+    if not isinstance(args, dict):
+        args = {}  # a small model sometimes answers in the wrong shape: fall back to the rules
     kind = args.get("kind")
     if not TRUST_MODEL_KIND or kind not in KINDS:
         kind = rule_kind(question, now)
     words = []
-    for w in args.get("words") or []:
+    raw_words = args.get("words")
+    for w in raw_words if isinstance(raw_words, list) else []:
         if isinstance(w, str) and w.strip() and w.strip() not in words:
             words.append(w.strip())
     words = words or _plain_words(question, now)
@@ -1200,10 +1203,15 @@ class Search:
 
     async def start(self):
         try:
+            await self._show(status_card(SEARCHING_TEXT))  # no longer "順番待ち"
             self.query = await understand(self.bot.session, self.bot.llm_url, self.question, datetime.now(JST),
                                           api_key=self.bot.llm_key)
         except LlmError as e:
             await self._show(status_card(f"⚠ {e}"))
+            return
+        except Exception:
+            log.exception("could not understand the request")
+            await self._show(status_card(FAILED_TEXT))
             return
         if self.query.kind == "other":
             await self._show(help_card())
