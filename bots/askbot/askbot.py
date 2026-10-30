@@ -441,6 +441,258 @@ class HistoryStore:
         ]
 
 
+# --- Records: per channel (threads included), with links and photos ----------
+
+@dataclass
+class Msg:
+    message_id: int
+    guild_id: int
+    record_id: int  # the recorded channel (a thread's parent)
+    place_id: int  # where it was written: the channel or a thread
+    private: bool  # written in a private thread
+    author: str
+    content: str
+    links: str  # URLs and link previews (title, description), one per line
+    created_at: datetime
+
+
+@dataclass
+class Photo:
+    attachment_id: int
+    message_id: int
+    guild_id: int
+    record_id: int
+    place_id: int
+    private: bool
+    author: str
+    created_at: datetime
+    kind: str = None
+    description: str = None
+
+
+@dataclass
+class RecordStats:
+    messages: int
+    since: datetime
+    photos: int
+    classified: int
+
+
+_RECORD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS records(record_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS messages(
+    message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, record_id INTEGER NOT NULL,
+    place_id INTEGER NOT NULL, private INTEGER NOT NULL, author TEXT NOT NULL, content TEXT NOT NULL,
+    links TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS messages_by_record ON messages(record_id, created_at);
+CREATE INDEX IF NOT EXISTS messages_by_place ON messages(place_id, created_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content, links, tokenize='trigram', content='messages', content_rowid='message_id');
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content, links) VALUES (new.message_id, new.content, new.links);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, links)
+        VALUES ('delete', old.message_id, old.content, old.links);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, links)
+        VALUES ('delete', old.message_id, old.content, old.links);
+    INSERT INTO messages_fts(rowid, content, links) VALUES (new.message_id, new.content, new.links);
+END;
+CREATE TABLE IF NOT EXISTS photos(
+    attachment_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+    record_id INTEGER NOT NULL, place_id INTEGER NOT NULL, private INTEGER NOT NULL, author TEXT NOT NULL,
+    created_at REAL NOT NULL, kind TEXT, description TEXT);
+CREATE INDEX IF NOT EXISTS photos_by_message ON photos(message_id);
+CREATE INDEX IF NOT EXISTS photos_unclassified ON photos(kind, created_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS photos_fts USING fts5(
+    kind, description, tokenize='trigram', content='photos', content_rowid='attachment_id');
+CREATE TRIGGER IF NOT EXISTS photos_ai AFTER INSERT ON photos BEGIN
+    INSERT INTO photos_fts(rowid, kind, description) VALUES (new.attachment_id, new.kind, new.description);
+END;
+CREATE TRIGGER IF NOT EXISTS photos_ad AFTER DELETE ON photos BEGIN
+    INSERT INTO photos_fts(photos_fts, rowid, kind, description)
+        VALUES ('delete', old.attachment_id, old.kind, old.description);
+END;
+CREATE TRIGGER IF NOT EXISTS photos_au AFTER UPDATE ON photos BEGIN
+    INSERT INTO photos_fts(photos_fts, rowid, kind, description)
+        VALUES ('delete', old.attachment_id, old.kind, old.description);
+    INSERT INTO photos_fts(rowid, kind, description) VALUES (new.attachment_id, new.kind, new.description);
+END;
+"""
+
+_MSG_COLUMNS = "message_id, guild_id, record_id, place_id, private, author, content, links, created_at"
+_PHOTO_COLUMNS = ("attachment_id, message_id, guild_id, record_id, place_id, private, author, created_at, "
+                  "kind, description")
+
+
+def _ts(dt):
+    return datetime.fromtimestamp(dt, timezone.utc)
+
+
+def _word_filter(words, fts_table, rowid, text_sql):
+    """(where, params, score, score_params) matching any of `words` in `text_sql`.
+
+    Words of 3+ characters use the trigram index; shorter ones (旅行, 猫) fall back to LIKE.
+    """
+    hits, params = [], []
+    long_words = [w for w in words if len(w) >= 3]
+    if long_words:
+        hits.append(f"{rowid} IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)")
+        params.append(" OR ".join('"' + w.replace('"', '""') + '"' for w in long_words))
+    for w in words:
+        if len(w) < 3:
+            hits.append(f"{text_sql} LIKE ? ESCAPE '!'")
+            params.append(_like(w))
+    score = " + ".join(f"({text_sql} LIKE ? ESCAPE '!')" for _ in words)
+    return "(" + " OR ".join(hits) + ")", params, score, [_like(w) for w in words]
+
+
+class RecordStore:
+    """What 紬 remembers, per recorded channel, kept in step with Discord (edits and deletes)."""
+
+    def __init__(self, path):
+        # Python Runner sets HOME to a folder it does not create.
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self._db = sqlite3.connect(path)
+        self._db.executescript(_RECORD_SCHEMA)
+
+    def register(self, guild_id, record_id):
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO records VALUES (?, ?)", (record_id, guild_id))
+
+    def unregister(self, guild_id, record_id):
+        with self._db:
+            self._db.execute("DELETE FROM records WHERE record_id = ? AND guild_id = ?", (record_id, guild_id))
+            self._db.execute("DELETE FROM messages WHERE record_id = ?", (record_id,))
+            self._db.execute("DELETE FROM photos WHERE record_id = ?", (record_id,))
+
+    def registered(self, guild_id):
+        return {r[0] for r in self._db.execute("SELECT record_id FROM records WHERE guild_id = ?", (guild_id,))}
+
+    def is_registered(self, record_id):
+        return self._db.execute("SELECT 1 FROM records WHERE record_id = ?", (record_id,)).fetchone() is not None
+
+    def upsert(self, msg, photos):
+        """Stores or updates a message and its photos, but only while its record is registered (checked
+        in the same statements, so nothing slips in after /記録やめる). A photo's class is kept."""
+        registered = "WHERE EXISTS (SELECT 1 FROM records WHERE record_id = ?)"
+        with self._db:
+            self._db.execute(
+                f"INSERT INTO messages SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? {registered} "
+                "ON CONFLICT(message_id) DO UPDATE SET author = excluded.author, content = excluded.content, "
+                "links = excluded.links",
+                (msg.message_id, msg.guild_id, msg.record_id, msg.place_id, int(msg.private), msg.author,
+                 msg.content, msg.links, msg.created_at.timestamp(), msg.record_id),
+            )
+            keep = [p.attachment_id for p in photos]
+            self._db.execute(
+                f"DELETE FROM photos WHERE message_id = ? AND attachment_id NOT IN ({','.join('?' * len(keep))})",
+                (msg.message_id, *keep),
+            )
+            for p in photos:
+                self._db.execute(
+                    f"INSERT INTO photos SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL {registered} "
+                    "ON CONFLICT(attachment_id) DO NOTHING",
+                    (p.attachment_id, p.message_id, p.guild_id, p.record_id, p.place_id, int(p.private), p.author,
+                     p.created_at.timestamp(), p.record_id),
+                )
+
+    def delete_message(self, message_id):
+        with self._db:
+            self._db.execute("DELETE FROM photos WHERE message_id = ?", (message_id,))
+            self._db.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+
+    def latest(self, place_id):
+        row = self._db.execute("SELECT MAX(created_at) FROM messages WHERE place_id = ?", (place_id,)).fetchone()
+        return _ts(row[0]) if row[0] is not None else None
+
+    @staticmethod
+    def _scope(record_id, place_id, since, until):
+        # A private thread's contents are shown only to a question asked inside that thread.
+        where = ["record_id = ?", "(private = 0 OR place_id = ?)"]
+        params = [record_id, place_id]
+        if since is not None:
+            where.append("created_at >= ?")
+            params.append(since.timestamp())
+        if until is not None:
+            where.append("created_at < ?")
+            params.append(until.timestamp())
+        return where, params
+
+    def search_messages(self, record_id, place_id, words, since, until, links_only, limit):
+        """Messages of one record, most word hits first, then newest first."""
+        where, params = self._scope(record_id, place_id, since, until)
+        if links_only:
+            where.append("links != ''")
+        score, score_params = "0", []
+        if words:
+            hit, hit_params, score, score_params = _word_filter(
+                words, "messages_fts", "message_id", "(content || ' ' || links)")
+            where.append(hit)
+            params += hit_params
+        rows = self._db.execute(
+            f"SELECT {_MSG_COLUMNS}, {score} AS score FROM messages WHERE {' AND '.join(where)} "
+            "ORDER BY score DESC, created_at DESC LIMIT ?", [*score_params, *params, limit])
+        return [Msg(r[0], r[1], r[2], r[3], bool(r[4]), r[5], r[6], r[7], _ts(r[8])) for r in rows]
+
+    def search_photos(self, record_id, place_id, words, kind, since, until, limit):
+        """Classified photos of one record, most word hits first, then newest first."""
+        where, params = self._scope(record_id, place_id, since, until)
+        where.append("kind IS NOT NULL")
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        score, score_params = "0", []
+        if words:
+            hit, hit_params, score, score_params = _word_filter(
+                words, "photos_fts", "attachment_id", "(kind || ' ' || description)")
+            where.append(hit)
+            params += hit_params
+        rows = self._db.execute(
+            f"SELECT {_PHOTO_COLUMNS}, {score} AS score FROM photos WHERE {' AND '.join(where)} "
+            "ORDER BY score DESC, created_at DESC LIMIT ?", [*score_params, *params, limit])
+        return [self._photo(r) for r in rows]
+
+    @staticmethod
+    def _photo(r):
+        return Photo(r[0], r[1], r[2], r[3], r[4], bool(r[5]), r[6], _ts(r[7]), r[8], r[9])
+
+    def next_unclassified(self):
+        """The newest photo not classified yet, or None."""
+        r = self._db.execute(
+            f"SELECT {_PHOTO_COLUMNS} FROM photos WHERE kind IS NULL ORDER BY created_at DESC LIMIT 1").fetchone()
+        return self._photo(r) if r else None
+
+    def save_class(self, attachment_id, kind, description):
+        with self._db:
+            self._db.execute("UPDATE photos SET kind = ?, description = ? WHERE attachment_id = ?",
+                             (kind, description, attachment_id))
+
+    def stats(self, record_id):
+        n, first = self._db.execute(
+            "SELECT COUNT(*), MIN(created_at) FROM messages WHERE record_id = ?", (record_id,)).fetchone()
+        photos, classified = self._db.execute(
+            "SELECT COUNT(*), COUNT(kind) FROM photos WHERE record_id = ?", (record_id,)).fetchone()
+        return RecordStats(n, _ts(first) if first is not None else None, photos, classified)
+
+    def import_old(self, path):
+        """Carries over which channels were recorded by the old askbot database (the messages are read
+        again from Discord). The old file is left as it is."""
+        if not os.path.exists(path):
+            return
+        old = sqlite3.connect(path)
+        try:
+            rows = old.execute("SELECT channel_id, guild_id FROM channels").fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            old.close()
+        for channel_id, guild_id in rows:
+            self.register(guild_id, channel_id)
+
+
 # --- LLM: llama-server on this phone -----------------------------------------
 
 # First in every request, unchanged, so llama-server can reuse its cached reading of it.
