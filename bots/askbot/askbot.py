@@ -811,6 +811,76 @@ async def stream_answer(session, base_url, messages, on_progress, on_text, *, ap
             await asyncio.sleep(2)
 
 
+@dataclass
+class LlmReply:
+    text: str
+    tool_args: dict = None
+
+
+async def llm_call(session, base_url, body, *, api_key=None, on_progress=None, wait_seconds=120):
+    """One streamed request to llama-server: the answer text and, when the model called a tool, its
+    arguments. While llama-server is (re)starting it retries every 2 seconds, calling on_progress(-1),
+    for up to wait_seconds. Cancelling the caller closes the connection, which stops llama-server."""
+    body = {**body, "stream": True, "return_progress": True}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=900)
+    deadline = time.monotonic() + wait_seconds
+
+    async def progress(p):
+        if on_progress is not None:
+            await on_progress(p)
+
+    while True:
+        started = False
+        text, arguments, called = [], [], False
+        try:
+            async with session.post(base_url + "/v1/chat/completions", json=body, headers=headers,
+                                    timeout=timeout) as r:
+                if r.status == 503:
+                    raise _NotReady()
+                if r.status >= 400:
+                    raise LlmError(_server_error(await r.text(), r.status))
+                async for raw in r.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line.startswith("error:"):
+                        raise LlmError(_server_error(line, None))
+                    event = parse_sse(line)
+                    if not event:
+                        continue
+                    started = True
+                    if "error" in event:
+                        raise LlmError(_server_error(json.dumps(event["error"], ensure_ascii=False), None))
+                    if "prompt_progress" in event:
+                        await progress(progress_percent(event["prompt_progress"]))
+                    for choice in event.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        if delta.get("content"):
+                            text.append(delta["content"])
+                        for call in delta.get("tool_calls") or []:
+                            called = True
+                            arguments.append((call.get("function") or {}).get("arguments") or "")
+        except (aiohttp.ClientError, asyncio.TimeoutError, _NotReady) as e:
+            # A drop after reading began is reported, never retried.
+            if started:
+                raise LlmError("答えている途中でAIモデルが止まりました。もう一度聞いてください。") from e
+            if not isinstance(e, (aiohttp.ClientConnectionError, _NotReady)):
+                raise LlmError("AIモデルとのやり取りに失敗しました。もう一度聞いてください。") from e
+            if time.monotonic() >= deadline:
+                raise LlmError(_UNREACHABLE_MESSAGE) from e
+            await progress(-1)
+            await asyncio.sleep(2)
+            continue
+        tool_args = None
+        if called:
+            try:
+                tool_args = json.loads("".join(arguments) or "{}")
+            except ValueError as e:
+                raise LlmError("AIモデルの答えを読めませんでした。もう一度聞いてください。") from e
+        if not text and tool_args is None:
+            raise LlmError("AIモデルから答えが返ってきませんでした。もう一度聞いてください。")
+        return LlmReply("".join(text), tool_args)
+
+
 def _server_error(detail, status):
     if "context" in detail:
         return _CONTEXT_MESSAGE
