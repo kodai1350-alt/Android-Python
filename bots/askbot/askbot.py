@@ -801,6 +801,62 @@ async def understand(session, base_url, question, now, *, api_key=None):
     photo_kind = args.get("photo_kind") if args.get("photo_kind") in PHOTO_KINDS else None
     return Query(kind, words, since, until, photo_kind, when)
 
+
+# --- Checking candidates: precision first -------------------------------------
+
+# Candidates gathered, and how many the model reads per request (decided by the phone spike, plan Task 1).
+MAX_CANDIDATES = 20
+CHECK_BATCH = 10
+RELEVANT_SCHEMA = {
+    "type": "object",
+    "properties": {"relevant": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["relevant"],
+}
+
+
+def _short_date(dt):
+    dt = dt.astimezone(JST)
+    return f"{dt.month}月{dt.day}日"
+
+
+def candidate_line(i, item):
+    if isinstance(item, Photo):
+        text = f"{item.kind} {item.description}"
+    else:
+        text = f"{item.content} {item.links}".replace("\n", " ").strip()
+    return f"{i}. {_short_date(item.created_at)} {item.author}: {text[:80]}"
+
+
+async def check_candidates(session, base_url, question, items, *, api_key=None, on_progress=None):
+    """The candidates the model judges to be what was asked for, in their original order, and whether
+    the check ran. When the model cannot be asked, every candidate comes back unchecked."""
+    kept = []
+    try:
+        for start in range(0, len(items), CHECK_BATCH):
+            batch = items[start:start + CHECK_BATCH]
+            if on_progress is not None:
+                await on_progress(start, len(items))
+            lines = "\n".join(candidate_line(i, item) for i, item in enumerate(batch, 1))
+            body = {
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"頼み: {question}\n\n候補:\n{lines}\n\n"
+                                                "頼みに当てはまる候補の番号だけを relevant に入れてください。"},
+                ],
+                "response_format": {"type": "json_schema", "json_schema": {"schema": RELEVANT_SCHEMA}},
+                "temperature": 0.1, "max_tokens": 100,
+            }
+            reply = await llm_call(session, base_url, body, api_key=api_key)
+            relevant = json.loads(reply.text).get("relevant")
+            if not isinstance(relevant, list):
+                raise ValueError("no relevant list")
+            numbers = {n for n in relevant if isinstance(n, int)}
+            kept += [item for i, item in enumerate(batch, 1) if i in numbers]
+    except (LlmError, ValueError, AttributeError):
+        log.exception("could not check candidates")
+        return items, False
+    return kept, True
+
 MAX_ANSWER_TOKENS = 1500
 _CONTEXT_MESSAGE = "写真や資料が大きすぎて読み切れませんでした。写真を減らすか、質問を短くしてください。"
 _UNREACHABLE_MESSAGE = (
