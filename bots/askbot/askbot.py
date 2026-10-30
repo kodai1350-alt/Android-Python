@@ -223,8 +223,68 @@ def _find_dates(text, now):
     return None, None
 
 
-def parse_date_range(text, now):
-    span, _ = _find_dates(unicodedata.normalize("NFKC", text), now)
+_AGO = re.compile(r"(\d+|半)(日|週間|週|か月|ヶ月|カ月|ケ月|月|年)前")
+_SEASONS = {"春": (3, 6), "夏": (6, 9), "秋": (9, 12), "冬": (12, 15)}
+
+
+def _add_months(dt, months):
+    """`dt` moved by whole months; the day is clamped to the end of a shorter month."""
+    start = _month_start(dt.year, dt.month + months)
+    following = _month_start(start.year, start.month + 1)
+    return start.replace(day=min(dt.day, (following - start).days))
+
+
+def _ago(amount, unit, today):
+    """(since, until) around "N units ago": since = center - width, until = center + width + 1 day."""
+    day = timedelta(days=1)
+    if amount == "半":
+        if unit == "月":
+            center, width = today - timedelta(days=15), timedelta(days=5)
+        elif unit == "年":
+            center = _add_months(today, -6)
+            return _add_months(center, -1), _add_months(center, 1) + day
+        else:
+            return None
+        return center - width, center + width + day
+    n = int(amount)
+    if unit == "日":
+        center, width = today - timedelta(days=n), day
+    elif unit in ("週間", "週"):
+        center, width = today - timedelta(days=7 * n), timedelta(days=3)
+    elif unit == "年":
+        center = _add_months(today, -12 * n)
+        return _add_months(center, -3), _add_months(center, 3) + day
+    elif unit == "月":
+        return None  # "3月前" is not a time word
+    else:
+        center = _add_months(today, -n)
+        return _add_months(center, -1), _add_months(center, 1) + day
+    return center - width, center + width + day
+
+
+def parse_when(text, now):
+    """The JST (since, until) a vague time word means; until is exclusive. (None, None) if none.
+
+    Vague words get a margin on both sides: people misremember dates, and a missed message is
+    worse than one more candidate to check.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    today = _day(now)
+    m = re.search(r"去年の(春|夏|秋|冬)", text)
+    if m:
+        first, last = _SEASONS[m.group(1)]
+        return _month_start(today.year - 1, first), _month_start(today.year - 1, last)
+    if "去年" in text:
+        return _month_start(today.year - 1, 1), _month_start(today.year, 1)
+    for m in _AGO.finditer(text):
+        span = _ago(m.group(1), m.group(2), today)
+        if span:
+            return span
+    if "最近" in text:
+        return today - timedelta(days=14), today + timedelta(days=1)
+    if "この前" in text:
+        return today - timedelta(days=30), today + timedelta(days=1)
+    span, _ = _find_dates(text, now)
     return span or (None, None)
 
 
