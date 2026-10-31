@@ -306,3 +306,25 @@ def test_classify_unknown_kind_becomes_other():
 
     kind, description = asyncio.run(run())
     assert kind == "その他" and len(description) == 80
+
+
+def test_cancelling_the_queue_always_stops_it():
+    # A cancel landing while _run_idle waits for its helper tasks must not be swallowed:
+    # the queue would keep running and asyncio.run would wait for it forever.
+    async def run():
+        async def instant():
+            return None
+
+        for _ in range(200):
+            q = AskQueue(idle=instant)
+            task = asyncio.create_task(q.run_forever())
+            for _ in range(_ % 7):
+                await asyncio.sleep(0)
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, 1)
+            except asyncio.CancelledError:
+                pass
+            assert task.cancelled(), "the queue swallowed its cancellation"
+
+    asyncio.run(run())

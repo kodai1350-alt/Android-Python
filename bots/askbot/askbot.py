@@ -89,15 +89,14 @@ class AskQueue:
         finally:
             for task in (idle, wake):
                 task.cancel()
-            failed = False
-            for task in (idle, wake):
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    log.exception("idle work failed")
-                    failed = True
+            # gather (not try/except around each await): a cancel aimed at this queue while it waits here
+            # must still stop it, never be mistaken for the helper tasks' own cancellation.
+            results = await asyncio.gather(idle, wake, return_exceptions=True)
+        failed = False
+        for result in results:
+            if isinstance(result, Exception):
+                log.error("idle work failed", exc_info=result)
+                failed = True
         if failed:
             # Never spin on a failure that repeats; a question still ends the wait at once.
             try:

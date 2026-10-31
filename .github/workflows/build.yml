@@ -29,10 +29,12 @@ jobs:
       - name: Lint (API level checks)
         run: ./gradlew lintDebug --console=plain
       - name: askbot tests
+        # A hang fails fast with a traceback instead of holding the runner for hours.
+        timeout-minutes: 10
         run: |
           python3 -m venv .venv
           .venv/bin/pip install "discord.py==2.7.1" pytest
-          .venv/bin/python -m pytest bots/askbot -q
+          .venv/bin/python -m pytest bots/askbot -q -o faulthandler_timeout=120
       - name: Linux-only tests must have run
         run: |
           python3 - <<'EOF'
