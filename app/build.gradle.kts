@@ -85,8 +85,20 @@ abstract class DownloadFile : DefaultTask() {
         val file = dest.get().asFile
         file.parentFile.mkdirs()
         val part = File(file.path + ".part")
-        URI(url.get()).toURL().openStream().use { input ->
-            part.outputStream().use { input.copyTo(it) }
+        // CI downloads these on every run: a network blip must not fail the build.
+        for (attempt in 1..3) {
+            try {
+                val connection = URI(url.get()).toURL().openConnection().apply {
+                    connectTimeout = 30_000
+                    readTimeout = 60_000
+                }
+                connection.getInputStream().use { input -> part.outputStream().use { input.copyTo(it) } }
+                break
+            } catch (e: java.io.IOException) {
+                if (attempt == 3) throw e
+                logger.warn("Download of ${url.get()} failed (${e.message}); trying again")
+                Thread.sleep(5_000L * attempt)
+            }
         }
         sha256.orNull?.let { expected ->
             val actual = MessageDigest.getInstance("SHA-256").digest(part.readBytes())
