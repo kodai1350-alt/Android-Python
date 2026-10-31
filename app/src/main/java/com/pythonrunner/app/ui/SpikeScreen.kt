@@ -606,19 +606,20 @@ private fun SharedChangesDialog(
                 Text("Documents/PythonRunner/MyBot で、次のファイルが変わっています。", fontSize = 13.sp)
                 changes.added.forEach { Text("＋ 追加：$it", color = Green, fontSize = 13.sp) }
                 changes.modified.forEach { Text("✎ 変更：$it", color = Color(0xFFF08C00), fontSize = 13.sp) }
-                changes.removed.forEach { Text("－ 削除：$it", color = Red, fontSize = 13.sp) }
+                changes.removed.forEach { Text("－ 削除：$it（実行用からも消えます）", color = Red, fontSize = 13.sp) }
                 Text(
-                    "自分で編集したものなら「${if (thenStart) "取り込んで起動" else "取り込む"}」を押してください。心当たりがない変更は、" +
-                        "他のアプリが書き換えた可能性があるので取り込まないでください。",
+                    "自分で変えたものなら「${if (thenStart) "反映して起動" else "反映する"}」を押すと、実行用の MyBot も同じになります。" +
+                        "「${if (thenStart) "反映せずに起動" else "反映しない"}」なら、実行用はそのままです。心当たりがない変更は、" +
+                        "他のアプリが書き換えた可能性があるので反映しないでください。",
                     fontSize = 12.sp, color = Color.DarkGray,
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onImport) { Text(if (thenStart) "取り込んで起動" else "取り込む") } },
+        confirmButton = { TextButton(onClick = onImport) { Text(if (thenStart) "反映して起動" else "反映する") } },
         dismissButton = {
             Row {
-                TextButton(onClick = onCancel) { Text(if (thenStart) "やめる" else "取り込まない") }
-                if (thenStart) TextButton(onClick = onSkip) { Text("取り込まずに起動") }
+                TextButton(onClick = onCancel) { Text(if (thenStart) "やめる" else "反映しない") }
+                if (thenStart) TextButton(onClick = onSkip) { Text("反映せずに起動") }
             }
         },
     )
