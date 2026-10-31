@@ -44,6 +44,25 @@ class SpikeBotStore(
         mainFile = fileName
     }
 
+    /**
+     * Deletes a file or folder of the bot ([relativePath] inside [botDir]; anything else is refused).
+     * Forgets the file to run first when it was deleted.
+     */
+    fun deleteFile(relativePath: String): Boolean {
+        val root = botDir.canonicalFile
+        val target = File(botDir, relativePath).canonicalFile
+        if (relativePath.isEmpty() || target == root || !target.path.startsWith(root.path + File.separator)) return false
+        if (!target.exists() || !target.deleteRecursively()) return false
+        forgetMissingMain()
+        return true
+    }
+
+    /** Clears the file to run first once it no longer exists (deleted here or by an import). */
+    fun forgetMissingMain() {
+        val main = mainFile ?: return
+        if (!File(botDir, main).isFile) mainFile = null
+    }
+
     private companion object {
         const val KEY_MAIN = "spike.mainFile"
         const val KEY_ENV = "spike.envVars"

@@ -6,6 +6,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class SpikeBotStoreTest {
     private val base: File = Files.createTempDirectory("sbs").toFile()
@@ -57,5 +59,44 @@ class SpikeBotStoreTest {
         assertFalse(store.wasRunning)
         store.wasRunning = true
         assertEquals(true, SpikeBotStore(base, prefs).wasRunning)
+    }
+
+    @Test fun deleteFileRemovesItAndForgetsMain() {
+        val store = SpikeBotStore(base, prefs)
+        store.importPy("bot.py", "print(1)".byteInputStream())
+        store.importPy("other.py", "print(2)".byteInputStream())
+        store.mainFile = "bot.py"
+        assertTrue(store.deleteFile("other.py"))
+        assertFalse(File(store.botDir, "other.py").exists())
+        assertEquals("bot.py", store.mainFile)
+        assertTrue(store.deleteFile("bot.py"))
+        assertNull(store.mainFile)
+    }
+
+    @Test fun deleteFolderRemovesItsFiles() {
+        val store = SpikeBotStore(base, prefs)
+        File(store.botDir, "cogs").mkdirs()
+        File(store.botDir, "cogs/a.py").writeText("x")
+        store.mainFile = "cogs/a.py"
+        assertTrue(store.deleteFile("cogs"))
+        assertFalse(File(store.botDir, "cogs").exists())
+        assertNull(store.mainFile)
+    }
+
+    @Test fun deleteFileStaysInsideTheBotFolder() {
+        val store = SpikeBotStore(base, prefs)
+        store.botDir.mkdirs()
+        val outside = File(base, "keep.txt").apply { writeText("x") }
+        assertFalse(store.deleteFile("../keep.txt"))
+        assertFalse(store.deleteFile(""))
+        assertTrue(outside.exists())
+    }
+
+    @Test fun forgetMissingMainAfterAnImportRemovedIt() {
+        val store = SpikeBotStore(base, prefs)
+        store.importPy("bot.py", "print(1)".byteInputStream())
+        File(store.botDir, "bot.py").delete()
+        store.forgetMissingMain()
+        assertNull(store.mainFile)
     }
 }

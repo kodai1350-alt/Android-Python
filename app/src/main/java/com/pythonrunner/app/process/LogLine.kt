@@ -14,4 +14,7 @@ class LogBuffer(private val capacity: Int = 2000) {
 
     @Synchronized
     fun snapshot(): List<LogLine> = lines.toList()
+
+    @Synchronized
+    fun clear() = lines.clear()
 }
