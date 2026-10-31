@@ -150,6 +150,24 @@ fun SpikeScreen() {
     LaunchedEffect(hasStorage) { if (hasStorage) exportShared() }
 
     var pendingImport by remember { mutableStateOf<SyncChanges?>(null) }
+    // Whether accepting pendingImport also starts the bot ("起動") or only brings the changes in ("🔄 更新").
+    var importThenStart by remember { mutableStateOf(true) }
+
+    // "🔄 更新": changes made in the shared copy (a file deleted with the Files app, say) are shown and,
+    // once confirmed, brought into the bot folder; otherwise the bot folder is mirrored out as before.
+    fun refreshShared() {
+        scope.launch {
+            val changes = withContext(Dispatchers.IO) {
+                runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
+            }
+            if (changes != null && !changes.isEmpty) {
+                importThenStart = false
+                pendingImport = changes
+            } else {
+                exportShared()
+            }
+        }
+    }
 
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -271,6 +289,14 @@ fun SpikeScreen() {
                     store.mainFile = path
                     mainFile = path
                 },
+                onDelete = if (status == BotStatus.RUNNING || status == BotStatus.STARTING) null else { path ->
+                    scope.launch {
+                        val deleted = withContext(Dispatchers.IO) { store.deleteFile(path) }
+                        mainFile = store.mainFile
+                        filesVersion++
+                        if (deleted) exportShared()  // the shared copy follows unless it was edited there
+                    }
+                },
                 lockedMessage = {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("ここを見るには、ストレージへのアクセスの許可が必要です。", fontSize = 12.sp)
@@ -282,7 +308,7 @@ fun SpikeScreen() {
                 OutlinedButton(enabled = !busy, onClick = { pickFile.launch(arrayOf("*/*")) }) {
                     Text("📄 .pyファイルを追加")
                 }
-                OutlinedButton(onClick = { exportShared() }) { Text("🔄 更新") }
+                OutlinedButton(onClick = { refreshShared() }) { Text("🔄 更新") }
             }
             if (hasStorage) {
                 Help("sharedWarning", uiPrefs) { Text(SHARED_WARNING, fontSize = 12.sp, color = Color(0xFFC92A2A)) }
@@ -459,7 +485,12 @@ fun SpikeScreen() {
                             val changes = withContext(Dispatchers.IO) {
                                 runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
                             }
-                            if (changes != null && !changes.isEmpty) pendingImport = changes else launchBot()
+                            if (changes != null && !changes.isEmpty) {
+                                importThenStart = true
+                                pendingImport = changes
+                            } else {
+                                launchBot()
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Green),
@@ -470,17 +501,24 @@ fun SpikeScreen() {
         pendingImport?.let { changes ->
             SharedChangesDialog(
                 changes,
+                thenStart = importThenStart,
                 onImport = {
                     pendingImport = null
                     scope.launch {
-                        // Files changed again after confirming are not imported: ask again instead of starting.
+                        // Files changed again after confirming are not imported: ask again instead of going on.
                         val again = withContext(Dispatchers.IO) {
                             val sync = BotController.sync(context)
                             val skipped = sync?.importChanges(changes).orEmpty()
+                            store.forgetMissingMain()  // the file to run first may have been deleted there
                             if (skipped.isEmpty()) null else sync?.pendingImports()
                         }
+                        mainFile = store.mainFile
                         filesVersion++
-                        if (again != null && !again.isEmpty) pendingImport = again else launchBot()
+                        when {
+                            again != null && !again.isEmpty -> pendingImport = again
+                            importThenStart && mainFile != null -> launchBot()
+                            else -> exportShared()
+                        }
                     }
                 },
                 onSkip = {
@@ -492,7 +530,12 @@ fun SpikeScreen() {
         }
 
         Section("7. ログ") {
-            if (botLogs.isEmpty()) Text("まだログはありません", color = Gray) else LogView(botLogs, context)
+            if (botLogs.isEmpty()) {
+                Text("まだログはありません", color = Gray)
+            } else {
+                LogView(botLogs, context)
+                OutlinedButton(onClick = { BotController.clearLogs() }) { Text("🗑 ログを消す", color = Red) }
+            }
         }
 
         Section("8. 端末の設定（画面オフで動かすため）") {
@@ -548,7 +591,13 @@ private const val SHARED_WARNING =
 
 /** Asks before running anything that changed in the shared copy, where other apps can write too. */
 @Composable
-private fun SharedChangesDialog(changes: SyncChanges, onImport: () -> Unit, onSkip: () -> Unit, onCancel: () -> Unit) {
+private fun SharedChangesDialog(
+    changes: SyncChanges,
+    thenStart: Boolean,
+    onImport: () -> Unit,
+    onSkip: () -> Unit,
+    onCancel: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onCancel,
         title = { Text("共有のコピーが変わっています") },
@@ -559,17 +608,17 @@ private fun SharedChangesDialog(changes: SyncChanges, onImport: () -> Unit, onSk
                 changes.modified.forEach { Text("✎ 変更：$it", color = Color(0xFFF08C00), fontSize = 13.sp) }
                 changes.removed.forEach { Text("－ 削除：$it", color = Red, fontSize = 13.sp) }
                 Text(
-                    "自分で編集したものなら「取り込んで起動」を押してください。心当たりがない変更は、" +
+                    "自分で編集したものなら「${if (thenStart) "取り込んで起動" else "取り込む"}」を押してください。心当たりがない変更は、" +
                         "他のアプリが書き換えた可能性があるので取り込まないでください。",
                     fontSize = 12.sp, color = Color.DarkGray,
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onImport) { Text("取り込んで起動") } },
+        confirmButton = { TextButton(onClick = onImport) { Text(if (thenStart) "取り込んで起動" else "取り込む") } },
         dismissButton = {
             Row {
-                TextButton(onClick = onCancel) { Text("やめる") }
-                TextButton(onClick = onSkip) { Text("取り込まずに起動") }
+                TextButton(onClick = onCancel) { Text(if (thenStart) "やめる" else "取り込まない") }
+                if (thenStart) TextButton(onClick = onSkip) { Text("取り込まずに起動") }
             }
         },
     )

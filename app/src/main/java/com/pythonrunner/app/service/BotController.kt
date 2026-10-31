@@ -201,6 +201,13 @@ object BotController {
         _status.value = BotStatus.RUNNING
     }
 
+    /** Empties the log shown in "7. ログ" (the bot keeps running). */
+    fun clearLogs() {
+        buffer.clear()
+        logsDirty.set(false)
+        _logs.value = emptyList()
+    }
+
     internal fun appendLog(line: LogLine) {
         buffer.add(line)
         logsDirty.set(true)
