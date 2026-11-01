@@ -1425,9 +1425,18 @@ class AskBot(discord.Client):
                 log.exception("reading back %s failed", channel.id)
                 return
             if announce_to is not None:
-                await announce_to.send(f"📚 過去の会話を{count}件読み込みました。")
+                await announce_to.send(self._read_back_report(channel.id, count))
         finally:
             self._reading.discard(channel.id)
+
+    def _read_back_report(self, record_id, count):
+        if count:
+            return f"📚 過去の会話を{count:,}件読み込みました。"
+        # Nothing new usually means the start-up read-back already got everything: say so.
+        stored = self.records.stats(record_id).messages
+        if stored:
+            return f"📚 新しく読み込む会話はありませんでした。記録は最新です（会話 {stored:,}件）。"
+        return "このチャンネルには、読み込める会話がありませんでした（Botの投稿は数えません）。"
 
     def _asks_me(self, message):
         """Written to 紬 with an @mention. A reply to 紬's card also pings it, but is not a question."""

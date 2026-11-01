@@ -304,3 +304,28 @@ def test_unexpected_error_shows_failed_card(tmp_path, monkeypatch):
     monkeypatch.setattr(askbot, "understand", broken)
     message, sent = mention("旅行の話", readable(id=A, name="雑談"))
     assert ask(bot, message, sent) == [askbot.FAILED_TEXT]
+
+
+def test_read_back_with_nothing_new_says_the_record_is_up_to_date(tmp_path, monkeypatch):
+    # "0件読み込みました" looked like a failure when the start-up read-back had already read everything.
+    bot = make_bot(tmp_path, monkeypatch)
+    bot.records.register(G, A)
+    bot.records.upsert(msg(1, "旅行"), [])
+    said = []
+
+    async def nothing_new(store, channel):
+        return 0
+
+    async def send(text):
+        said.append(text)
+
+    monkeypatch.setattr(askbot, "backfill", nothing_new)
+    asyncio.run(bot.read_back(SimpleNamespace(id=A), SimpleNamespace(send=send)))
+    assert said == ["📚 新しく読み込む会話はありませんでした。記録は最新です（会話 1件）。"]
+
+    bot.records.unregister(G, A)
+    bot.records.register(G, A)
+    said.clear()
+    asyncio.run(bot.read_back(SimpleNamespace(id=A), SimpleNamespace(send=send)))
+    assert said == ["このチャンネルには、読み込める会話がありませんでした（Botの投稿は数えません）。"]
+    asyncio.run(bot.close())
