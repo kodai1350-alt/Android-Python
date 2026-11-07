@@ -22,6 +22,8 @@ import kotlin.concurrent.thread
 /** Keeps the bot process alive with the screen off: foreground notification plus a partial wake lock. */
 class BotService : Service() {
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
+    // Set by ACTION_RESTART: when the running bot has finished stopping, start it again.
+    @Volatile private var restartRequested = false
 
     private val runner by lazy {
         val store = BotController.store(this)
@@ -61,6 +63,7 @@ class BotService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START -> startBot()
+            ACTION_RESTART -> restartBot()
             // Restarted by the system after being killed.
             null -> if (BotController.store(this).wasRunning) {
                 startBot()
@@ -86,7 +89,18 @@ class BotService : Service() {
         BotController.store(this).wasRunning = true
     }
 
+    private fun restartBot() {
+        if (!runner.isActive) {
+            startBot()
+            return
+        }
+        goForeground()
+        restartRequested = true
+        thread(name = "bot-restart") { runner.stop() }
+    }
+
     private fun stopBot() {
+        restartRequested = false
         BotController.store(this).wasRunning = false
         if (runner.isActive) {
             thread(name = "bot-stop") { runner.stop() }
@@ -103,6 +117,12 @@ class BotService : Service() {
         if (status == BotStatus.CRASHED) notifyCrash(exitCode)
         // Show what the bot wrote (data files etc.) in the shared copy too.
         thread(name = "bot-export") { runCatching { BotController.sync(this)?.export() } }
+        if (restartRequested) {
+            restartRequested = false
+            BotController.appendLog(LogLine(System.currentTimeMillis(), "再起動します", false))
+            startBot()
+            return
+        }
         // A new start may already be under way; leave its wake lock and service alone.
         if (runner.isActive) return
         releaseWakeLock()
@@ -161,6 +181,7 @@ class BotService : Service() {
     companion object {
         const val ACTION_START = "com.pythonrunner.app.START"
         const val ACTION_STOP = "com.pythonrunner.app.STOP"
+        const val ACTION_RESTART = "com.pythonrunner.app.RESTART"
         private const val CHANNEL_BOTS = "bots"
         private const val CHANNEL_ALERTS = "alerts"
         private const val NOTIFICATION_RUNNING = 1

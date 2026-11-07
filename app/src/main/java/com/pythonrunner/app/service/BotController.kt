@@ -110,6 +110,12 @@ object BotController {
         ContextCompat.startForegroundService(context, intent)
     }
 
+    /** Stops the bot and starts it again, so files changed while it ran are used. */
+    fun restart(context: Context) {
+        val intent = Intent(context, BotService::class.java).setAction(BotService.ACTION_RESTART)
+        ContextCompat.startForegroundService(context, intent)
+    }
+
     fun stop(context: Context) {
         context.startService(Intent(context, BotService::class.java).setAction(BotService.ACTION_STOP))
     }
