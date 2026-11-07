@@ -1,6 +1,7 @@
 package com.pythonrunner.app.files
 
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.nio.charset.Charset
 import java.util.zip.ZipException
@@ -94,6 +95,104 @@ object BotImporter {
             existing.isFile && !sameContent(existing, File(staging, path))
         }
         return ImportPlan(files, overwrites, files.sumOf { File(staging, it).length() })
+    }
+
+    /**
+     * Moves the staged files into [botDir], overwriting files of the same name and leaving every other
+     * file alone. The files it replaces are moved to [backup] first; if anything fails, the new files are
+     * removed, the old ones put back, and the error rethrown. A marker in [backup] lets [recover] do the
+     * same after the app was killed midway.
+     */
+    fun applyPlan(
+        plan: ImportPlan,
+        staging: File,
+        botDir: File,
+        backup: File,
+        move: (File, File) -> Unit = ::defaultMove,
+    ) {
+        for (path in plan.files) {
+            val target = File(botDir, path)
+            if (target.isDirectory) throw IOException("「$path」は同じ名前のフォルダがあるため取り込めません")
+            if (ancestors(path).any { File(botDir, it).isFile }) {
+                throw IOException("「$path」は途中の名前と同じファイルがあるため取り込めません")
+            }
+        }
+        val existing = plan.files.filter { File(botDir, it).isFile }
+        val added = plan.files - existing.toSet()
+        backup.mkdirs()
+        val marker = File(backup, MARKER)
+        marker.writeText(existing.joinToString("") { "E\t$it\n" } + added.joinToString("") { "N\t$it\n" })
+        val placed = mutableListOf<String>()
+        try {
+            for (path in existing) move(File(botDir, path), File(backup, path))
+            for (path in plan.files) {
+                move(File(staging, path), File(botDir, path))
+                placed += path
+            }
+        } catch (e: Exception) {
+            for (path in placed) File(botDir, path).delete()
+            restoreFromMarker(botDir, backup)
+            throw e
+        }
+        backup.deleteRecursively()
+        staging.deleteRecursively()
+    }
+
+    /**
+     * Puts the bot folder back as it was before an import the app did not live to finish. True if
+     * there was one. The staging folder is always cleared.
+     */
+    fun recover(botDir: File, backup: File, staging: File): Boolean {
+        staging.deleteRecursively()
+        if (!File(backup, MARKER).isFile) return false
+        restoreFromMarker(botDir, backup)
+        return true
+    }
+
+    /** The file to run first: [current] while it exists, else main.py, bot.py, app.py, or the only top .py. */
+    fun pickMain(botDir: File, current: String?): String? {
+        if (current != null && File(botDir, current).isFile) return current
+        MAIN_NAMES.firstOrNull { File(botDir, it).isFile }?.let { return it }
+        val top = botDir.listFiles().orEmpty().filter { it.isFile && it.name.endsWith(".py") }
+        return top.singleOrNull()?.name
+    }
+
+    /** The top-level requirements.txt of the staged files, if any. */
+    fun requirements(staging: File): String? = File(staging, "requirements.txt").takeIf { it.isFile }?.readText()
+
+    private const val MARKER = ".importing"
+    private val MAIN_NAMES = listOf("main.py", "bot.py", "app.py")
+
+    /** New files ("N") are removed; files moved aside ("E") go back. Originals never moved stay put. */
+    private fun restoreFromMarker(botDir: File, backup: File) {
+        val marker = File(backup, MARKER)
+        for (line in marker.readLines()) {
+            val kind = line.substringBefore('\t')
+            val path = safePath(line.substringAfter('\t', "")) ?: continue
+            val target = File(botDir, path)
+            val saved = File(backup, path)
+            when (kind) {
+                "N" -> target.delete()
+                "E" -> if (saved.isFile) {
+                    target.delete()
+                    defaultMove(saved, target)
+                }
+            }
+        }
+        backup.deleteRecursively()
+    }
+
+    private fun ancestors(path: String): List<String> {
+        val parts = path.split('/')
+        return (1 until parts.size).map { parts.take(it).joinToString("/") }
+    }
+
+    private fun defaultMove(from: File, to: File) {
+        to.parentFile?.mkdirs()
+        if (!from.renameTo(to)) {
+            from.copyTo(to, overwrite = true)
+            from.delete()
+        }
     }
 
     /** Bytes still missing to hold [needed] with a safety margin left over, or 0 when it fits. */

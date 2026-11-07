@@ -126,6 +126,105 @@ class BotImporterTest {
         assertEquals(0L, BotImporter.missingBytes(100, margin + 100))
     }
 
+    private val backup = File(root, "backup")
+
+    private fun contents(dir: File): Map<String, String> =
+        dir.walkTopDown().filter { it.isFile }.associate { it.relativeTo(dir).invariantSeparatorsPath to it.readText() }
+
+    @Test fun applyOverwritesAndKeepsOtherFiles() {
+        put(botDir, "main.py", "old")
+        put(botDir, "keep.db", "Z")
+        put(staging, "main.py", "new")
+        put(staging, "cogs/a.py", "a")
+        BotImporter.applyPlan(BotImporter.plan(staging, botDir), staging, botDir, backup)
+        assertEquals(mapOf("main.py" to "new", "keep.db" to "Z", "cogs/a.py" to "a"), contents(botDir))
+        assertEquals(emptyMap(), contents(backup))
+        assertEquals(emptyMap(), contents(staging))
+    }
+
+    @Test fun failureMidwayRestoresTheBotFolder() {
+        put(botDir, "a.py", "old-a")
+        put(botDir, "b.py", "old-b")
+        put(botDir, "keep.db", "Z")
+        put(staging, "a.py", "new-a")
+        put(staging, "b.py", "new-b")
+        put(staging, "new.py", "n")
+        val before = contents(botDir)
+        var moves = 0
+        val failing: (File, File) -> Unit = { from, to ->
+            // Moving the old files aside works; the second new file fails.
+            if (from.path.startsWith(staging.path) && ++moves == 2) throw java.io.IOException("disk error")
+            check(from.renameTo(to.apply { parentFile!!.mkdirs() }))
+        }
+        assertFailsWith<java.io.IOException> {
+            BotImporter.applyPlan(BotImporter.plan(staging, botDir), staging, botDir, backup, failing)
+        }
+        assertEquals(before, contents(botDir))
+    }
+
+    @Test fun fileOverAFolderOfTheSameNameFailsCleanly() {
+        put(botDir, "data/x.json", "{}")
+        put(staging, "data", "file")
+        put(staging, "main.py", "m")
+        val before = contents(botDir)
+        assertFailsWith<java.io.IOException> {
+            BotImporter.applyPlan(BotImporter.plan(staging, botDir), staging, botDir, backup)
+        }
+        assertEquals(before, contents(botDir))
+    }
+
+    @Test fun recoverRestoresAnInterruptedApply() {
+        put(botDir, "main.py", "new")
+        put(botDir, "new.py", "n")
+        put(botDir, "keep.db", "Z")
+        put(backup, "main.py", "old")
+        put(backup, ".importing", "E\tmain.py\nN\tnew.py\n")
+        put(staging, "left.py", "x")
+        assertTrue(BotImporter.recover(botDir, backup, staging))
+        assertEquals(mapOf("main.py" to "old", "keep.db" to "Z"), contents(botDir))
+        assertFalse(staging.exists())
+        assertFalse(File(backup, ".importing").exists())
+    }
+
+    @Test fun recoverLeavesOriginalsThatWereNotMovedAsideYet() {
+        // Interrupted while moving the old files aside: b.py was never touched.
+        put(botDir, "b.py", "old-b")
+        put(backup, "a.py", "old-a")
+        put(backup, ".importing", "E\ta.py\nE\tb.py\nN\tnew.py\n")
+        assertTrue(BotImporter.recover(botDir, backup, staging))
+        assertEquals(mapOf("a.py" to "old-a", "b.py" to "old-b"), contents(botDir))
+    }
+
+    @Test fun recoverWithNothingToDoReturnsFalse() {
+        put(botDir, "main.py", "m")
+        assertFalse(BotImporter.recover(botDir, backup, staging))
+        assertEquals(mapOf("main.py" to "m"), contents(botDir))
+    }
+
+    @Test fun pickMainOrder() {
+        put(botDir, "bot.py", "")
+        put(botDir, "app.py", "")
+        assertEquals("bot.py", BotImporter.pickMain(botDir, null))
+        put(botDir, "main.py", "")
+        assertEquals("main.py", BotImporter.pickMain(botDir, null))
+        put(botDir, "x.py", "")
+        assertEquals("x.py", BotImporter.pickMain(botDir, "x.py"))
+        assertEquals("main.py", BotImporter.pickMain(botDir, "gone.py"))
+        val other = File(root, "other")
+        put(other, "run.py", "")
+        put(other, "lib/helper.py", "")
+        assertEquals("run.py", BotImporter.pickMain(other, null))
+        put(other, "b.py", "")
+        assertEquals(null, BotImporter.pickMain(other, null))
+    }
+
+    @Test fun requirementsReadsTopLevelOnly() {
+        put(staging, "sub/requirements.txt", "deep")
+        assertEquals(null, BotImporter.requirements(staging))
+        put(staging, "requirements.txt", "discord.py\naiohttp\n")
+        assertEquals("discord.py\naiohttp\n", BotImporter.requirements(staging))
+    }
+
     @Test fun progressEndsAt100() {
         val seen = mutableListOf<Int>()
         BotImporter.stageZip(zip("a.py" to "a", "b.py" to "b"), staging) { seen += it }
