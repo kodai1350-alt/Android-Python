@@ -10,7 +10,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
-import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -72,6 +71,7 @@ import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
 import com.pythonrunner.app.service.BotController
+import com.pythonrunner.app.service.ImportState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -158,16 +158,24 @@ fun SpikeScreen() {
     }
 
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            try {
-                val name = displayName(context, uri) ?: "main.py"
-                context.contentResolver.openInputStream(uri)!!.use { store.importPy(name, it) }
-                mainFile = store.mainFile
-                exportShared()
-            } catch (e: Exception) {
-                workLog += LogLine(System.currentTimeMillis(), "ファイルを取り込めませんでした: ${e.message}", true)
-            }
-        }
+        if (uri != null) BotController.importFile(context, uri)
+    }
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) BotController.importFolder(context, uri)
+    }
+    val importState by BotController.importState.collectAsStateWithLifecycle()
+    var importNote by remember { mutableStateOf<String?>(null) }
+    var askRestart by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { BotController.recoverImport(context) }
+    LaunchedEffect(importState) {
+        val done = importState as? ImportState.Done ?: return@LaunchedEffect
+        // The person just imported these: use their requirements.txt over what the box held.
+        done.requirements?.let { packages = it }
+        mainFile = store.mainFile
+        filesVersion++
+        importNote = "✓ ${done.count}個のファイルを取り込みました"
+        askRestart = done.botWasRunning
+        BotController.finishImport()
     }
 
     val askStorage = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -293,10 +301,34 @@ fun SpikeScreen() {
                 },
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(enabled = !busy, onClick = { pickFile.launch(arrayOf("*/*")) }) {
-                    Text("📄 .pyファイルを追加")
-                }
+                val importing = importState is ImportState.Working || importState is ImportState.Confirm
+                ImportButton(
+                    enabled = !busy && !importing,
+                    onPickFile = { importNote = null; pickFile.launch(arrayOf("*/*")) },
+                    onPickFolder = { importNote = null; pickFolder.launch(null) },
+                )
                 OutlinedButton(onClick = { refreshShared() }) { Text("🔄 更新") }
+            }
+            ImportStateView(
+                importState,
+                onConfirm = { BotController.confirmImport(context) },
+                onCancel = { BotController.cancelImport(context) },
+                onClose = { BotController.finishImport() },
+            )
+            importNote?.let { Text(it, color = Green, fontSize = 13.sp) }
+            Help("import", uiPrefs) {
+                Text(
+                    "「📥 取り込む」で、.py・ZIP・そのほかのファイル、またはフォルダごと取り込めます。" +
+                        "同じ名前のファイルは新しいものに置き換わり、ほかのファイルは残ります。" +
+                        "Googleドライブのフォルダは、ドライブでZIPとしてダウンロードしてから「ファイルを選ぶ」で取り込めます。",
+                    fontSize = 12.sp, color = Color.DarkGray,
+                )
+            }
+            if (askRestart) {
+                RestartDialog(
+                    onRestart = { askRestart = false; BotController.restart(context) },
+                    onLater = { askRestart = false },
+                )
             }
             if (hasStorage) {
                 Help("sharedWarning", uiPrefs) { Text(SHARED_WARNING, fontSize = 12.sp, color = Color(0xFFC92A2A)) }
@@ -665,8 +697,3 @@ private fun formatUptime(millis: Long): String {
     val s = total % 60
     return if (h > 0) "${h}時間${m}分" else "${m}分${s}秒"
 }
-
-private fun displayName(context: Context, uri: Uri): String? =
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-        if (c.moveToFirst()) c.getString(0) else null
-    }
