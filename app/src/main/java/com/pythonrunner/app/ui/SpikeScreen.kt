@@ -63,6 +63,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.duplicateNames
 import com.pythonrunner.app.files.SyncChanges
@@ -141,18 +143,29 @@ fun SpikeScreen() {
     // Whether accepting pendingImport also starts the bot ("起動") or only brings the changes in ("🔄 更新").
     var importThenStart by remember { mutableStateOf(true) }
 
-    // "🔄 更新": changes made in the shared copy (a file deleted with the Files app, say) are shown and,
-    // once confirmed, brought into the bot folder; otherwise the bot folder is mirrored out as before.
-    fun refreshShared() {
-        scope.launch {
-            val changes = withContext(Dispatchers.IO) {
-                runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
-            }
-            if (changes != null && !changes.isEmpty) {
-                importThenStart = false
-                pendingImport = changes
-            } else {
-                exportShared()
+    // While the screen is shown, notice changes made in the shared copy (a file deleted with the Files
+    // app, say) without any button: a cheap fingerprint every few seconds, the full comparison only when
+    // it moved. Bringing them in still needs 反映する.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(hasStorage, lifecycleOwner) {
+        if (!hasStorage) return@LaunchedEffect
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            exportShared()
+            var checked: String? = null
+            while (true) {
+                val fingerprint = withContext(Dispatchers.IO) { runCatching { BotController.sync(context)?.fingerprint() }.getOrNull() }
+                val busyNow = pendingImport != null || BotController.importState.value != ImportState.Idle
+                if (fingerprint != null && fingerprint != checked && !busyNow) {
+                    val changes = withContext(Dispatchers.IO) {
+                        runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
+                    }
+                    checked = fingerprint
+                    if (changes != null && !changes.isEmpty && changes != BotController.declinedChanges) {
+                        importThenStart = false
+                        pendingImport = changes
+                    }
+                }
+                delay(SHARED_CHECK_MILLIS)
             }
         }
     }
@@ -255,7 +268,7 @@ fun SpikeScreen() {
                         )
                         Text(
                             "実行するのはアプリ専用の場所（他のアプリから書き換えられない）のファイルです。" +
-                                "共有のコピーで変更があったときは、起動前に一覧を見せて、取り込むか確認します。" +
+                                "共有のコピーで変更があると、自動で気づいて一覧を見せ、反映するか確認します。" +
                                 ".env などの秘密のファイルはコピーしません。",
                             fontSize = 12.sp, color = Color.DarkGray,
                         )
@@ -307,7 +320,6 @@ fun SpikeScreen() {
                     onPickFile = { importNote = null; pickFile.launch(arrayOf("*/*")) },
                     onPickFolder = { importNote = null; pickFolder.launch(null) },
                 )
-                OutlinedButton(onClick = { refreshShared() }) { Text("🔄 更新") }
             }
             ImportStateView(
                 importState,
@@ -480,7 +492,11 @@ fun SpikeScreen() {
                         when {
                             again != null && !again.isEmpty -> pendingImport = again
                             importThenStart && mainFile != null -> launchBot()
-                            else -> exportShared()
+                            else -> {
+                                exportShared()
+                                // A running bot keeps the old files until it starts again.
+                                if (status == BotStatus.RUNNING || status == BotStatus.STARTING) askRestart = true
+                            }
                         }
                     }
                 },
@@ -488,7 +504,11 @@ fun SpikeScreen() {
                     pendingImport = null
                     launchBot()
                 },
-                onCancel = { pendingImport = null },
+                onCancel = {
+                    // 反映しない: not offered again until something else changes (起動 still asks).
+                    if (!importThenStart) BotController.declinedChanges = changes
+                    pendingImport = null
+                },
             )
         }
 
@@ -697,3 +717,6 @@ private fun formatUptime(millis: Long): String {
     val s = total % 60
     return if (h > 0) "${h}時間${m}分" else "${m}分${s}秒"
 }
+
+/** How often the shared copy is checked for changes while the screen is shown. */
+private const val SHARED_CHECK_MILLIS = 4_000L
