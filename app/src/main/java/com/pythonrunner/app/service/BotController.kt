@@ -12,8 +12,7 @@ import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.KeyValue
 import com.pythonrunner.app.bot.SpikeBotStore
 import com.pythonrunner.app.files.FolderSync
-import com.pythonrunner.app.llm.LlmServer
-import com.pythonrunner.app.llm.ModelDownloader
+import com.pythonrunner.app.files.LeftoverFiles
 import com.pythonrunner.app.process.LogBuffer
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.process.ManagedProcess
@@ -28,68 +27,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-/** Whether the LLM model files are on the phone. */
-sealed interface LlmState {
-    data object Missing : LlmState
-    data class Downloading(val percent: Int) : LlmState
-    data object Ready : LlmState
-    data class Failed(val message: String) : LlmState
-}
-
 /** Shared state between [BotService] and the UI. */
 object BotController {
-    private val _llmState = MutableStateFlow<LlmState>(LlmState.Missing)
-    val llmState: StateFlow<LlmState> = _llmState
-    private val downloading = AtomicBoolean(false)
-    @Volatile private var downloadCancelled = false
-
-    fun models(context: Context): ModelDownloader =
-        ModelDownloader(File(context.applicationContext.filesDir, "llm-models"))
-
-    fun llmServer(context: Context): LlmServer =
-        LlmServer(File(context.applicationContext.applicationInfo.nativeLibraryDir), models(context))
-
-    fun refreshLlmState(context: Context) {
-        if (downloading.get()) return
-        _llmState.value = if (models(context).isReady()) LlmState.Ready else LlmState.Missing
-    }
-
-    fun startModelDownload(context: Context) {
-        if (!downloading.compareAndSet(false, true)) return
-        downloadCancelled = false
-        val models = models(context)
-        _llmState.value = LlmState.Downloading(0)
-        thread(name = "model-download") {
-            try {
-                models.download(
-                    onProgress = { done, total ->
-                        val percent = (done * 100 / total).toInt()
-                        if ((_llmState.value as? LlmState.Downloading)?.percent != percent) {
-                            _llmState.value = LlmState.Downloading(percent)
-                        }
-                    },
-                    isCancelled = { downloadCancelled },
-                )
-                _llmState.value = LlmState.Ready
-            } catch (e: ModelDownloader.Cancelled) {
-                _llmState.value = LlmState.Missing
-            } catch (e: Throwable) {
-                // Errors too (e.g. a method missing on an old Android): show them instead of crashing the app.
-                _llmState.value = LlmState.Failed("ダウンロードに失敗しました: ${e.message ?: e.javaClass.simpleName}")
-            } finally {
-                downloading.set(false)
-            }
+    /** Frees the space of the AI model a test build downloaded (the AI is set aside for now). */
+    fun removeLeftoverFiles(context: Context) {
+        thread(name = "leftover-cleanup") {
+            runCatching { LeftoverFiles.removeAiModels(context.applicationContext.filesDir) }
         }
-    }
-
-    fun cancelModelDownload() {
-        downloadCancelled = true
-    }
-
-    fun deleteModel(context: Context) {
-        if (downloading.get()) return
-        models(context).delete()
-        _llmState.value = LlmState.Missing
     }
 
     private val _status = MutableStateFlow(BotStatus.STOPPED)
@@ -201,7 +145,7 @@ object BotController {
         _status.value = BotStatus.RUNNING
     }
 
-    /** Empties the log shown in "7. ログ" (the bot keeps running). */
+    /** Empties the log shown in "6. ログ" (the bot keeps running). */
     fun clearLogs() {
         buffer.clear()
         logsDirty.set(false)

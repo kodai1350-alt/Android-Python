@@ -31,11 +31,6 @@ class SpikeBotStore(
         get() = prefs.get(KEY_RUNNING) == "true"
         set(value) = prefs.put(KEY_RUNNING, value.toString())
 
-    /** CPU threads for llama-server; used from the next start. */
-    var llmThreads: Int
-        get() = prefs.get(KEY_LLM_THREADS)?.toIntOrNull() ?: 4
-        set(value) = prefs.put(KEY_LLM_THREADS, value.toString())
-
     fun importPy(fileName: String, input: InputStream) {
         val target = File(botDir, fileName)
         require(target.canonicalFile.parentFile == botDir.canonicalFile) { "Invalid file name: $fileName" }
@@ -67,7 +62,6 @@ class SpikeBotStore(
         const val KEY_MAIN = "spike.mainFile"
         const val KEY_ENV = "spike.envVars"
         const val KEY_RUNNING = "spike.wasRunning"
-        const val KEY_LLM_THREADS = "llmThreads"
 
         fun encode(vars: Map<String, String>): String =
             vars.entries.joinToString("&") { (k, v) -> "${enc(k)}=${enc(v)}" }
