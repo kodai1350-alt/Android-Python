@@ -121,6 +121,31 @@ class FolderSync(
         writeManifest(manifest)
     }
 
+    /**
+     * Copies the given bot files to the shared folder as they are now, even over shared edits not yet
+     * brought in: an import the user just chose wins, or the next check would offer the old shared
+     * content back over it. Secrets and unsafe paths are skipped.
+     */
+    fun exportForced(paths: Collection<String>) {
+        val manifest = readManifest().toMutableMap()
+        for (path in paths) {
+            if (isSecret(path.substringAfterLast('/'))) continue
+            val source = resolveUnder(privateDir, path) ?: continue
+            val target = resolveUnder(sharedDir, path) ?: continue
+            if (!source.isFile) continue
+            target.parentFile?.mkdirs()
+            source.copyTo(target, overwrite = true)
+            manifest[path] = hash(source)
+        }
+        writeManifest(manifest)
+    }
+
+    /** A cheap mark of the shared folder (names, sizes, times; no content read) to notice changes. */
+    fun fingerprint(): String =
+        files(sharedDir).entries.sortedBy { it.key }
+            .joinToString("\n") { (path, file) -> "$path\t${file.length()}\t${file.lastModified()}" }
+            .hashCode().toString()
+
     private fun files(dir: File): Map<String, File> =
         dir.walkTopDown()
             .onEnter { it == dir || it.name != "__pycache__" }

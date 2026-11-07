@@ -173,4 +173,32 @@ class FolderSyncTest {
         write(shared, ".env", "TOKEN=evil")
         assertTrue(sync.pendingImports().isEmpty)
     }
+
+    @Test fun forcedExportOverwritesUnimportedSharedEdits() {
+        write(private, "main.py", "v1")
+        sync.export()
+        write(shared, "main.py", "edited in shared")
+        assertEquals(listOf("main.py"), sync.pendingImports().modified)
+        write(private, "main.py", "imported")
+        sync.exportForced(listOf("main.py"))
+        assertEquals("imported", read(shared, "main.py"))
+        assertTrue(sync.pendingImports().isEmpty)
+    }
+
+    @Test fun forcedExportSkipsSecrets() {
+        write(private, ".env", "TOKEN=x")
+        write(private, "a.py", "a")
+        sync.exportForced(listOf(".env", "a.py", "../escape.py"))
+        assertFalse(File(shared, ".env").exists())
+        assertEquals("a", read(shared, "a.py"))
+    }
+
+    @Test fun fingerprintChangesWhenASharedFileChanges() {
+        write(private, "main.py", "v1")
+        sync.export()
+        val first = sync.fingerprint()
+        assertEquals(first, sync.fingerprint())
+        write(shared, "main.py", "v2").setLastModified(System.currentTimeMillis() + 60_000)
+        assertTrue(first != sync.fingerprint())
+    }
 }
