@@ -177,7 +177,7 @@ class BotImporterTest {
         put(botDir, "main.py", "new")
         put(botDir, "new.py", "n")
         put(botDir, "keep.db", "Z")
-        put(backup, "main.py", "old")
+        put(backup, "files/main.py", "old")
         put(backup, ".importing", "E\tmain.py\nN\tnew.py\n")
         put(staging, "left.py", "x")
         assertTrue(BotImporter.recover(botDir, backup, staging))
@@ -189,10 +189,34 @@ class BotImporterTest {
     @Test fun recoverLeavesOriginalsThatWereNotMovedAsideYet() {
         // Interrupted while moving the old files aside: b.py was never touched.
         put(botDir, "b.py", "old-b")
-        put(backup, "a.py", "old-a")
+        put(backup, "files/a.py", "old-a")
         put(backup, ".importing", "E\ta.py\nE\tb.py\nN\tnew.py\n")
         assertTrue(BotImporter.recover(botDir, backup, staging))
         assertEquals(mapOf("a.py" to "old-a", "b.py" to "old-b"), contents(botDir))
+    }
+
+    @Test fun aBotFileNamedLikeTheMarkerCannotBreakTheRollback() {
+        put(botDir, ".importing", "bot's own file")
+        put(botDir, "keep.db", "Z")
+        put(staging, ".importing", "new")
+        put(staging, "a.py", "a")
+        val before = contents(botDir)
+        val failing: (File, File) -> Unit = { from, to ->
+            if (from.path.startsWith(staging.path) && from.name == "a.py") throw java.io.IOException("disk error")
+            check(from.renameTo(to.apply { parentFile!!.mkdirs() }))
+        }
+        assertFailsWith<java.io.IOException> {
+            BotImporter.applyPlan(BotImporter.plan(staging, botDir), staging, botDir, backup, failing)
+        }
+        assertEquals(before, contents(botDir))
+    }
+
+    @Test fun namesWithLineBreaksOrTabsAreNotImported() {
+        val children = listOf("ok.py", "a\nN\tkeep.db", "b\tc.py", "d\r.py").map { name ->
+            name to { "x".byteInputStream() as java.io.InputStream }
+        }
+        assertEquals(1, BotImporter.stageTree(children, staging))
+        assertEquals(listOf("ok.py"), stagedPaths())
     }
 
     @Test fun recoverWithNothingToDoReturnsFalse() {

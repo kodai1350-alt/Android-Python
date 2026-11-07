@@ -124,7 +124,8 @@ object BotImporter {
         marker.writeText(existing.joinToString("") { "E\t$it\n" } + added.joinToString("") { "N\t$it\n" })
         val placed = mutableListOf<String>()
         try {
-            for (path in existing) move(File(botDir, path), File(backup, path))
+            // Originals go under files/, apart from the marker, so no bot file can overwrite it.
+            for (path in existing) move(File(botDir, path), File(backup, "$FILES/$path"))
             for (path in plan.files) {
                 move(File(staging, path), File(botDir, path))
                 placed += path
@@ -161,6 +162,7 @@ object BotImporter {
     fun requirements(staging: File): String? = File(staging, "requirements.txt").takeIf { it.isFile }?.readText()
 
     private const val MARKER = ".importing"
+    private const val FILES = "files"
     private val MAIN_NAMES = listOf("main.py", "bot.py", "app.py")
 
     /** New files ("N") are removed; files moved aside ("E") go back. Originals never moved stay put. */
@@ -170,7 +172,7 @@ object BotImporter {
             val kind = line.substringBefore('\t')
             val path = safePath(line.substringAfter('\t', "")) ?: continue
             val target = File(botDir, path)
-            val saved = File(backup, path)
+            val saved = File(backup, "$FILES/$path")
             when (kind) {
                 "N" -> target.delete()
                 "E" -> if (saved.isFile) {
@@ -231,7 +233,8 @@ object BotImporter {
     /** A relative path with "/" separators that stays inside the folder, or null. */
     private fun safePath(name: String): String? {
         val path = name.replace('\\', '/')
-        if (path.startsWith("/") || path.contains(':')) return null
+        // Control characters would also let a name forge lines of the rollback marker.
+        if (path.startsWith("/") || path.contains(':') || path.any { it < ' ' || it.code == 0x7f }) return null
         val parts = path.split('/').filter { it.isNotEmpty() && it != "." }
         if (parts.isEmpty() || parts.any { it == ".." }) return null
         return parts.joinToString("/")
