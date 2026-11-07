@@ -7,6 +7,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -79,6 +80,50 @@ class BotImporterTest {
 
     @Test fun zipSizeSumsUncompressedSizes() {
         assertEquals(7L, BotImporter.zipSize(zip("a.py" to "abc", "b/c.py" to "defg")))
+    }
+
+    private val botDir = File(root, "bot")
+
+    private fun put(dir: File, path: String, text: String) =
+        File(dir, path).apply { parentFile!!.mkdirs(); writeText(text) }
+
+    @Test fun stageFilePutsItAtTheTop() {
+        BotImporter.stageFile("bot.py", "print(1)".byteInputStream(), staging)
+        assertEquals("print(1)", File(staging, "bot.py").readText())
+        assertFailsWith<IllegalArgumentException> { BotImporter.stageFile("../x.py", "x".byteInputStream(), staging) }
+        assertFailsWith<IllegalArgumentException> { BotImporter.stageFile("", "x".byteInputStream(), staging) }
+    }
+
+    @Test fun stageTreeSkipsJunkAndUnsafePaths() {
+        val children = listOf(
+            "main.py" to "m", "cogs/a.py" to "a", "__pycache__/x.pyc" to "c", "../evil.py" to "e",
+        ).map { (path, text) -> path to { text.byteInputStream() as java.io.InputStream } }
+        assertEquals(2, BotImporter.stageTree(children, staging))
+        assertEquals(listOf("cogs/a.py", "main.py"), stagedPaths())
+    }
+
+    @Test fun planListsOnlyChangedExistingFilesAsOverwrites() {
+        put(botDir, "main.py", "A")
+        put(botDir, "data.json", "X")
+        put(botDir, "keep.db", "Z")
+        put(staging, "main.py", "B")
+        put(staging, "data.json", "X")
+        put(staging, "new.py", "N")
+        val plan = BotImporter.plan(staging, botDir)
+        assertEquals(listOf("main.py"), plan.overwrites)
+        assertEquals(listOf("data.json", "main.py", "new.py"), plan.files)
+    }
+
+    @Test fun planCountsBytes() {
+        put(staging, "a.py", "abc")
+        put(staging, "b/c.py", "de")
+        assertEquals(5L, BotImporter.plan(staging, botDir).bytes)
+    }
+
+    @Test fun missingBytesKeepsAMargin() {
+        val margin = 50L * 1024 * 1024
+        assertEquals(1L, BotImporter.missingBytes(100, margin + 99))
+        assertEquals(0L, BotImporter.missingBytes(100, margin + 100))
     }
 
     @Test fun progressEndsAt100() {

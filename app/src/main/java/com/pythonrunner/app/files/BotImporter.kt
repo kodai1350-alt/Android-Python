@@ -7,6 +7,12 @@ import java.util.zip.ZipException
 import java.util.zip.ZipFile
 
 /**
+ * What an import would do: every file it brings in, the existing files whose content it would
+ * replace (asked about first), and its size. Paths are relative with "/" separators, sorted.
+ */
+data class ImportPlan(val files: List<String>, val overwrites: List<String>, val bytes: Long)
+
+/**
  * Brings files into the bot folder in three steps: everything is first placed in a staging folder,
  * then planned (what it would overwrite, how big it is), then moved in with the old files kept
  * aside until the move has finished.
@@ -50,6 +56,64 @@ object BotImporter {
         liftSingleTopFolder(staging)
         onProgress(100)
         return count
+    }
+
+    /** Places one picked file at the top of [staging] (only the last part of [name] is used). */
+    fun stageFile(name: String, input: InputStream, staging: File) {
+        val fileName = name.replace('\\', '/').substringAfterLast('/')
+        require(fileName.isNotEmpty() && fileName != "." && fileName != "..") { "Invalid file name: $name" }
+        require(!name.split('/', '\\').contains("..")) { "Invalid file name: $name" }
+        staging.mkdirs()
+        write(staging, fileName) { input }
+    }
+
+    /**
+     * Writes a picked folder's files (relative path, how to open it) into [staging] and returns how
+     * many it placed; skipped folders and unsafe paths are dropped.
+     */
+    fun stageTree(children: List<Pair<String, () -> InputStream>>, staging: File, onProgress: (Int) -> Unit = {}): Int {
+        staging.mkdirs()
+        var count = 0
+        children.forEachIndexed { i, (name, open) ->
+            val path = safePath(name)
+            if (path != null && !isSkipped(path)) {
+                write(staging, path, open)
+                count++
+            }
+            onProgress(((i + 1) * 100 / children.size.coerceAtLeast(1)).coerceIn(0, 99))
+        }
+        onProgress(100)
+        return count
+    }
+
+    /** What importing [staging] into [botDir] would do. */
+    fun plan(staging: File, botDir: File): ImportPlan {
+        val files = filesIn(staging)
+        val overwrites = files.filter { path ->
+            val existing = File(botDir, path)
+            existing.isFile && !sameContent(existing, File(staging, path))
+        }
+        return ImportPlan(files, overwrites, files.sumOf { File(staging, it).length() })
+    }
+
+    /** Bytes still missing to hold [needed] with a safety margin left over, or 0 when it fits. */
+    fun missingBytes(needed: Long, available: Long, margin: Long = 50L * 1024 * 1024): Long =
+        (needed + margin - available).coerceAtLeast(0)
+
+    private fun filesIn(dir: File): List<String> =
+        dir.walkTopDown().filter { it.isFile }.map { it.relativeTo(dir).invariantSeparatorsPath }.sorted().toList()
+
+    private fun sameContent(a: File, b: File): Boolean {
+        if (a.length() != b.length()) return false
+        a.inputStream().buffered().use { x ->
+            b.inputStream().buffered().use { y ->
+                while (true) {
+                    val c = x.read()
+                    if (c != y.read()) return false
+                    if (c < 0) return true
+                }
+            }
+        }
     }
 
     /**
