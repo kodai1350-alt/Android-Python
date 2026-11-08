@@ -29,23 +29,25 @@ class FolderSync(
     private val manifestFile: File,
 ) {
     fun pendingImports(): SyncChanges {
-        val manifest = readManifest()
-        val sharedFiles = files(sharedDir)
-        val added = mutableListOf<String>()
-        val modified = mutableListOf<String>()
-        val hashes = HashMap<String, String>()
-        for ((path, file) in sharedFiles) {
-            val known = manifest[path]
-            val current = hash(file)
-            when {
-                known == null -> added += path
-                current != known -> modified += path
-                else -> continue
+        synchronized(LOCK) {
+            val manifest = readManifest()
+            val sharedFiles = files(sharedDir)
+            val added = mutableListOf<String>()
+            val modified = mutableListOf<String>()
+            val hashes = HashMap<String, String>()
+            for ((path, file) in sharedFiles) {
+                val known = manifest[path]
+                val current = hash(file)
+                when {
+                    known == null -> added += path
+                    current != known -> modified += path
+                    else -> continue
+                }
+                hashes[path] = current
             }
-            hashes[path] = current
+            val removed = manifest.keys.filter { it !in sharedFiles }
+            return SyncChanges(added.sorted(), modified.sorted(), removed.sorted(), hashes)
         }
-        val removed = manifest.keys.filter { it !in sharedFiles }
-        return SyncChanges(added.sorted(), modified.sorted(), removed.sorted(), hashes)
     }
 
     /**
@@ -53,72 +55,76 @@ class FolderSync(
      * still matches what the user confirmed; the others are returned (they stay pending).
      */
     fun importChanges(changes: SyncChanges): List<String> {
-        val manifest = readManifest().toMutableMap()
-        val skipped = mutableListOf<String>()
-        val staging = File(manifestFile.parentFile, manifestFile.name + ".import")
-        for (path in changes.added + changes.modified) {
-            val source = resolveUnder(sharedDir, path)
-            val target = resolveUnder(privateDir, path)
-            val expected = changes.hashes[path]
-            if (source == null || target == null || expected == null || !source.isFile) {
-                skipped += path
-                continue
-            }
-            // Hash the private copy itself, so a swap after confirmation cannot slip through.
-            source.copyTo(staging, overwrite = true)
-            if (hash(staging) != expected) {
+        synchronized(LOCK) {
+            val manifest = readManifest().toMutableMap()
+            val skipped = mutableListOf<String>()
+            val staging = File(manifestFile.parentFile, manifestFile.name + ".import")
+            for (path in changes.added + changes.modified) {
+                val source = resolveUnder(sharedDir, path)
+                val target = resolveUnder(privateDir, path)
+                val expected = changes.hashes[path]
+                if (source == null || target == null || expected == null || !source.isFile) {
+                    skipped += path
+                    continue
+                }
+                // Hash the private copy itself, so a swap after confirmation cannot slip through.
+                source.copyTo(staging, overwrite = true)
+                if (hash(staging) != expected) {
+                    staging.delete()
+                    skipped += path
+                    continue
+                }
+                staging.copyTo(target, overwrite = true)
                 staging.delete()
-                skipped += path
-                continue
+                manifest[path] = expected
             }
-            staging.copyTo(target, overwrite = true)
-            staging.delete()
-            manifest[path] = expected
-        }
-        for (path in changes.removed) {
-            val target = resolveUnder(privateDir, path) ?: continue
-            target.delete()
-            manifest.remove(path)
-        }
-        writeManifest(manifest)
-        return skipped
-    }
-
-    fun export() {
-        val manifest = readManifest().toMutableMap()
-        val privateFiles = files(privateDir)
-        for ((path, file) in privateFiles) {
-            val target = File(sharedDir, path)
-            val known = manifest[path]
-            when {
-                // Never synced: share it unless something else already sits there.
-                known == null -> if (!target.exists()) {
-                    file.copyTo(target, overwrite = false)
-                    manifest[path] = hash(file)
-                }
-                // Deleted in shared by the user: leave it deleted (it is a pending removal).
-                !target.exists() -> Unit
-                // Unchanged in shared since the last sync: safe to update with the app's version.
-                hash(target) == known -> {
-                    val current = hash(file)
-                    if (current != known) {
-                        file.copyTo(target, overwrite = true)
-                        manifest[path] = current
-                    }
-                }
-                // Edited in shared: keep the user's version (it is a pending import).
-                else -> Unit
-            }
-        }
-        // The bot deleted a file: drop the shared copy if nobody edited it there.
-        for (path in manifest.keys.toList() - privateFiles.keys) {
-            val target = File(sharedDir, path)
-            if (target.isFile && hash(target) == manifest[path]) {
+            for (path in changes.removed) {
+                val target = resolveUnder(privateDir, path) ?: continue
                 target.delete()
                 manifest.remove(path)
             }
+            writeManifest(manifest)
+            return skipped
         }
-        writeManifest(manifest)
+    }
+
+    fun export() {
+        synchronized(LOCK) {
+            val manifest = readManifest().toMutableMap()
+            val privateFiles = files(privateDir)
+            for ((path, file) in privateFiles) {
+                val target = File(sharedDir, path)
+                val known = manifest[path]
+                when {
+                    // Never synced: share it unless something else already sits there.
+                    known == null -> if (!target.exists()) {
+                        file.copyTo(target, overwrite = false)
+                        manifest[path] = hash(file)
+                    }
+                    // Deleted in shared by the user: leave it deleted (it is a pending removal).
+                    !target.exists() -> Unit
+                    // Unchanged in shared since the last sync: safe to update with the app's version.
+                    hash(target) == known -> {
+                        val current = hash(file)
+                        if (current != known) {
+                            file.copyTo(target, overwrite = true)
+                            manifest[path] = current
+                        }
+                    }
+                    // Edited in shared: keep the user's version (it is a pending import).
+                    else -> Unit
+                }
+            }
+            // The bot deleted a file: drop the shared copy if nobody edited it there.
+            for (path in manifest.keys.toList() - privateFiles.keys) {
+                val target = File(sharedDir, path)
+                if (target.isFile && hash(target) == manifest[path]) {
+                    target.delete()
+                    manifest.remove(path)
+                }
+            }
+            writeManifest(manifest)
+        }
     }
 
     /**
@@ -127,17 +133,19 @@ class FolderSync(
      * content back over it. Secrets and unsafe paths are skipped.
      */
     fun exportForced(paths: Collection<String>) {
-        val manifest = readManifest().toMutableMap()
-        for (path in paths) {
-            if (isSecret(path.substringAfterLast('/'))) continue
-            val source = resolveUnder(privateDir, path) ?: continue
-            val target = resolveUnder(sharedDir, path) ?: continue
-            if (!source.isFile) continue
-            target.parentFile?.mkdirs()
-            source.copyTo(target, overwrite = true)
-            manifest[path] = hash(source)
+        synchronized(LOCK) {
+            val manifest = readManifest().toMutableMap()
+            for (path in paths) {
+                if (isSecret(path.substringAfterLast('/'))) continue
+                val source = resolveUnder(privateDir, path) ?: continue
+                val target = resolveUnder(sharedDir, path) ?: continue
+                if (!source.isFile) continue
+                target.parentFile?.mkdirs()
+                source.copyTo(target, overwrite = true)
+                manifest[path] = hash(source)
+            }
+            writeManifest(manifest)
         }
-        writeManifest(manifest)
     }
 
     /** A cheap mark of the shared folder (names, sizes, times; no content read) to notice changes. */
@@ -187,6 +195,12 @@ class FolderSync(
     }
 
     companion object {
+        /**
+         * Every FolderSync shares one manifest: an export on screen resume and an import's forced export
+         * must not each write back a manifest read before the other's change.
+         */
+        private val LOCK = Any()
+
         /** A relative path that stays inside the bot folder and fits on one manifest line. */
         fun isSafePath(path: String): Boolean =
             path.isNotEmpty() && !path.startsWith("/") && path.none { it in UNSAFE_CHARS } &&

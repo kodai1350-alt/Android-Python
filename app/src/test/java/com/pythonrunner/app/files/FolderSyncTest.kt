@@ -193,6 +193,20 @@ class FolderSyncTest {
         assertEquals("a", read(shared, "a.py"))
     }
 
+    @Test fun exportRunningAlongsideAForcedExportLosesNothing() {
+        // The screen's export on resume and an import's forced export can run at the same time.
+        repeat(300) { write(private, "f$it.py", "x$it") }
+        sync.export()
+        val exporter = Thread { repeat(30) { FolderSync(private, shared, File(root, "manifest.txt")).export() } }
+        exporter.start()
+        repeat(30) {
+            write(private, "new$it.py", "n$it")
+            FolderSync(private, shared, File(root, "manifest.txt")).exportForced(listOf("new$it.py"))
+        }
+        exporter.join()
+        assertTrue(sync.pendingImports().isEmpty, sync.pendingImports().toString())
+    }
+
     @Test fun fingerprintChangesWhenASharedFileChanges() {
         write(private, "main.py", "v1")
         sync.export()

@@ -249,6 +249,55 @@ class BotImporterTest {
         assertEquals("discord.py\naiohttp\n", BotImporter.requirements(staging))
     }
 
+    @Test fun stageFileRejectsControlCharacters() {
+        // A provider name like this would forge a marker line that deletes the bot's data.json.
+        assertFailsWith<IllegalArgumentException> {
+            BotImporter.stageFile("x\nN\tdata.json", "x".byteInputStream(), staging)
+        }
+    }
+
+    @Test fun zipSizeIgnoresSkippedAndUnsafeEntries() {
+        assertEquals(3L, BotImporter.zipSize(zip("a.py" to "abc", "venv/big.bin" to "xxxxxxxx", "../e.py" to "zz")))
+    }
+
+    @Test fun macZipJunkIsSkipped() {
+        BotImporter.stageZip(
+            zip("Bot/main.py" to "m", "__MACOSX/Bot/._main.py" to "x", "Bot/.DS_Store" to "d"),
+            staging,
+        )
+        assertEquals(listOf("main.py"), stagedPaths())
+    }
+
+    @Test fun shiftJisCharsetIsAvailable() {
+        assertTrue(BotImporter.shiftJis().newEncoder().canEncode("日本語のファイル"))
+    }
+
+    @Test fun killedWhileCleaningUpKeepsTheImport() {
+        put(botDir, "main.py", "old")
+        put(staging, "main.py", "new")
+        put(staging, "new.py", "n")
+        val killed: (File) -> Unit = { dir ->
+            // Some saved originals are gone, then the app dies before the rest of the cleanup.
+            File(dir, "files").deleteRecursively()
+            throw IllegalStateException("killed")
+        }
+        assertFailsWith<IllegalStateException> {
+            BotImporter.applyPlan(BotImporter.plan(staging, botDir), staging, botDir, backup, cleanup = killed)
+        }
+        BotImporter.recover(botDir, backup, staging)
+        assertEquals(mapOf("main.py" to "new", "new.py" to "n"), contents(botDir))
+    }
+
+    @Test fun leftoverMarkerIsRecoveredBeforeANewApply() {
+        // An earlier rollback died midway: data.json's original is still saved aside.
+        put(botDir, "data.json", "half-imported")
+        put(backup, "files/data.json", "old-data")
+        put(backup, ".importing", "E\tdata.json\n")
+        put(staging, "a.py", "a")
+        BotImporter.applyPlan(BotImporter.plan(staging, botDir), staging, botDir, backup)
+        assertEquals(mapOf("data.json" to "old-data", "a.py" to "a"), contents(botDir))
+    }
+
     @Test fun progressEndsAt100() {
         val seen = mutableListOf<Int>()
         BotImporter.stageZip(zip("a.py" to "a", "b.py" to "b"), staging) { seen += it }

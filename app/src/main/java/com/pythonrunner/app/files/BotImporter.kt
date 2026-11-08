@@ -19,17 +19,23 @@ data class ImportPlan(val files: List<String>, val overwrites: List<String>, val
  * aside until the move has finished.
  */
 object BotImporter {
-    /** Folders never imported, at any depth: caches, version control and virtual environments. */
-    private val SKIPPED_FOLDERS = setOf("__pycache__", ".git", "venv", ".venv")
+    /**
+     * Folders never imported, at any depth: caches, version control, virtual environments, and the
+     * resource forks macOS Finder adds to ZIPs.
+     */
+    val SKIPPED_FOLDERS = setOf("__pycache__", ".git", "venv", ".venv", "__MACOSX")
+    private val SKIPPED_FILES = setOf(".DS_Store")
 
-    fun isSkipped(relativePath: String): Boolean =
-        relativePath.split('/').dropLast(1).any { it in SKIPPED_FOLDERS }
+    fun isSkipped(relativePath: String): Boolean {
+        val parts = relativePath.split('/')
+        return parts.last() in SKIPPED_FILES || parts.dropLast(1).any { it in SKIPPED_FOLDERS }
+    }
 
-    /** Total size of the ZIP's files once extracted. */
+    /** Total size of the ZIP's files that would be imported, once extracted. */
     fun zipSize(zip: File): Long = openZip(zip).use { file ->
-        file.entries().asSequence().filter { !it.isDirectory }.sumOf { entry ->
-            entry.size.takeIf { it >= 0 } ?: entry.compressedSize.coerceAtLeast(0)
-        }
+        file.entries().asSequence()
+            .filter { !it.isDirectory && safePath(it.name)?.let { path -> !isSkipped(path) } == true }
+            .sumOf { entry -> entry.size.takeIf { it >= 0 } ?: entry.compressedSize.coerceAtLeast(0) }
     }
 
     /**
@@ -61,9 +67,10 @@ object BotImporter {
 
     /** Places one picked file at the top of [staging] (only the last part of [name] is used). */
     fun stageFile(name: String, input: InputStream, staging: File) {
-        val fileName = name.replace('\\', '/').substringAfterLast('/')
-        require(fileName.isNotEmpty() && fileName != "." && fileName != "..") { "Invalid file name: $name" }
         require(!name.split('/', '\\').contains("..")) { "Invalid file name: $name" }
+        // safePath also refuses control characters, which could forge lines of the rollback marker.
+        val fileName = safePath(name.replace('\\', '/').substringAfterLast('/'))
+            ?: throw IllegalArgumentException("Invalid file name: $name")
         staging.mkdirs()
         write(staging, fileName) { input }
     }
@@ -109,7 +116,11 @@ object BotImporter {
         botDir: File,
         backup: File,
         move: (File, File) -> Unit = ::defaultMove,
+        cleanup: (File) -> Unit = { it.deleteRecursively() },
     ) {
+        // A rollback that itself died left originals saved aside: put them back before anything else,
+        // or this import's marker would replace that one and its cleanup would delete them.
+        if (File(backup, MARKER).isFile) restoreFromMarker(botDir, backup)
         for (path in plan.files) {
             val target = File(botDir, path)
             if (target.isDirectory) throw IOException("「$path」は同じ名前のフォルダがあるため取り込めません")
@@ -121,7 +132,10 @@ object BotImporter {
         val added = plan.files - existing.toSet()
         backup.mkdirs()
         val marker = File(backup, MARKER)
-        marker.writeText(existing.joinToString("") { "E\t$it\n" } + added.joinToString("") { "N\t$it\n" })
+        // Written whole and then renamed into place, so a kill mid-write never leaves a half line.
+        val pending = File(backup, "$MARKER.tmp")
+        pending.writeText(existing.joinToString("") { "E\t$it\n" } + added.joinToString("") { "N\t$it\n" })
+        if (!pending.renameTo(marker)) throw IOException("取り込みの準備に失敗しました")
         val placed = mutableListOf<String>()
         try {
             // Originals go under files/, apart from the marker, so no bot file can overwrite it.
@@ -135,7 +149,9 @@ object BotImporter {
             restoreFromMarker(botDir, backup)
             throw e
         }
-        backup.deleteRecursively()
+        // The commit point: once the marker is gone the import stands, whatever the cleanup gets to.
+        if (!marker.delete()) throw IOException("取り込みを確定できませんでした")
+        cleanup(backup)
         staging.deleteRecursively()
     }
 
@@ -160,6 +176,12 @@ object BotImporter {
 
     /** The top-level requirements.txt of the staged files, if any. */
     fun requirements(staging: File): String? = File(staging, "requirements.txt").takeIf { it.isFile }?.readText()
+
+    /** Shift_JIS as Windows writes it, under whichever name this platform knows it by. */
+    fun shiftJis(): Charset =
+        listOf("MS932", "windows-31j", "Shift_JIS").firstNotNullOf { name ->
+            runCatching { Charset.forName(name) }.getOrNull()
+        }
 
     private const val MARKER = ".importing"
     private const val FILES = "files"
@@ -219,16 +241,20 @@ object BotImporter {
 
     /**
      * Windows' built-in ZIP writes names in the PC's code page (Shift_JIS on Japanese PCs) without
-     * marking them: read those again as MS932 when they are not valid UTF-8.
+     * marking them: read those again as Shift_JIS when they are not valid UTF-8.
      */
-    private fun openZip(zip: File): ZipFile =
-        try {
-            ZipFile(zip, Charsets.UTF_8).also { it.entries().asSequence().forEach { e -> e.name } }
-        } catch (e: ZipException) {
-            ZipFile(zip, Charset.forName("MS932"))
-        } catch (e: IllegalArgumentException) {
-            ZipFile(zip, Charset.forName("MS932"))
+    private fun openZip(zip: File): ZipFile {
+        var utf8: ZipFile? = null
+        return try {
+            utf8 = ZipFile(zip, Charsets.UTF_8)
+            utf8.entries().asSequence().forEach { it.name }  // names may be decoded only when read
+            utf8
+        } catch (e: Exception) {
+            if (e !is ZipException && e !is IllegalArgumentException) throw e
+            utf8?.close()
+            ZipFile(zip, shiftJis())
         }
+    }
 
     /** A relative path with "/" separators that stays inside the folder, or null. */
     private fun safePath(name: String): String? {
