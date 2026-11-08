@@ -29,7 +29,11 @@ class BotService : Service() {
         val store = BotController.store(this)
         val rt = BotController.runtime(this)
         BotRunner(
-            prepare = { rt.ensureInstalled() },
+            prepare = {
+                // An import the app did not live to finish is undone first, never run half-applied.
+                BotController.recoverImportNow(this)
+                rt.ensureInstalled()
+            },
             createProcess = { onLine, onExit ->
                 val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
                 ManagedProcess(

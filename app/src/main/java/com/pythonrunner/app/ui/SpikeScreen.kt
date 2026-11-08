@@ -133,7 +133,10 @@ fun SpikeScreen() {
     // Mirror the private bot folder to the shared copy (never overwrites edits made there).
     fun exportShared() {
         scope.launch {
-            withContext(Dispatchers.IO) { runCatching { BotController.sync(context)?.export() } }
+            // During an import the import itself updates the shared copy.
+            if (BotController.importState.value == ImportState.Idle) {
+                withContext(Dispatchers.IO) { runCatching { BotController.sync(context)?.export() } }
+            }
             filesVersion++
         }
     }
@@ -177,6 +180,7 @@ fun SpikeScreen() {
         if (uri != null) BotController.importFolder(context, uri)
     }
     val importState by BotController.importState.collectAsStateWithLifecycle()
+    val importBusy = importState is ImportState.Working || importState is ImportState.Confirm
     var importNote by remember { mutableStateOf<String?>(null) }
     var askRestart by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { BotController.recoverImport(context) }
@@ -298,7 +302,7 @@ fun SpikeScreen() {
                     store.mainFile = path
                     mainFile = path
                 },
-                onDelete = if (status == BotStatus.RUNNING || status == BotStatus.STARTING) null else { path ->
+                onDelete = if (status == BotStatus.RUNNING || status == BotStatus.STARTING || importBusy) null else { path ->
                     scope.launch {
                         val deleted = withContext(Dispatchers.IO) { store.deleteFile(path) }
                         mainFile = store.mainFile
@@ -454,7 +458,8 @@ fun SpikeScreen() {
                 ) { Text("停止") }
             } else {
                 Button(
-                    enabled = ready && mainFile != null && !busy,
+                    // Never start on a folder an import is still moving files into.
+                    enabled = ready && mainFile != null && !busy && !importBusy,
                     onClick = {
                         scope.launch {
                             val changes = withContext(Dispatchers.IO) {

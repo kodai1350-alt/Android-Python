@@ -58,7 +58,7 @@ object BotController {
     private fun backupDir(context: Context) = File(context.applicationContext.filesDir, "import-backup")
 
     /** A picked file: a ZIP is extracted, anything else (.py, config.json…) is added as it is. */
-    fun importFile(context: Context, uri: Uri) = startImport(context) { app, staging ->
+    fun importFile(context: Context, uri: Uri) = startImport(context, uri) { app, staging ->
         val name = SafTree.displayName(app, uri) ?: "file"
         val open = { app.contentResolver.openInputStream(uri) ?: error("ファイルを開けませんでした") }
         if (name.lowercase().endsWith(".zip")) {
@@ -67,6 +67,8 @@ object BotController {
             try {
                 open().use { input -> zip.outputStream().use { input.copyTo(it) } }
                 requireSpace(BotImporter.zipSize(zip), app.filesDir)
+                // Android 14+ refuses a whole ZIP over one ".." name; BotImporter drops such names itself.
+                if (Build.VERSION.SDK_INT >= 34) dalvik.system.ZipPathValidator.clearCallback()
                 BotImporter.stageZip(zip, staging) { _importState.value = ImportState.Working(it) }
             } finally {
                 zip.delete()
@@ -79,8 +81,8 @@ object BotController {
     }
 
     /** A picked folder, with everything in it. */
-    fun importFolder(context: Context, treeUri: Uri) = startImport(context) { app, staging ->
-        val files = SafTree.list(app, treeUri)
+    fun importFolder(context: Context, treeUri: Uri) = startImport(context, treeUri) { app, staging ->
+        val files = SafTree.list(app, treeUri).filter { !BotImporter.isSkipped(it.path) }
         requireSpace(files.sumOf { it.size }, app.filesDir)
         BotImporter.stageTree(files.map { it.path to it.open }, staging) { _importState.value = ImportState.Working(it) }
     }
@@ -106,6 +108,13 @@ object BotController {
         if (state is ImportState.Done || state is ImportState.Failed) _importState.value = ImportState.Idle
     }
 
+    /** Before the bot starts: same as [recoverImport], but done now, so it never runs on a half import. */
+    fun recoverImportNow(context: Context) {
+        if (_importState.value != ImportState.Idle) return
+        val app = context.applicationContext
+        runCatching { BotImporter.recover(store(app).botDir, backupDir(app), stagingDir(app)) }
+    }
+
     /** At app start: undo an import the app did not live to finish. */
     fun recoverImport(context: Context) {
         if (_importState.value != ImportState.Idle) return
@@ -115,15 +124,28 @@ object BotController {
         }
     }
 
-    private fun startImport(context: Context, stage: (Context, File) -> Int) {
+    private fun startImport(context: Context, picked: Uri, stage: (Context, File) -> Int) {
         val state = _importState.value
         if (state is ImportState.Working || state is ImportState.Confirm) return
         _importState.value = ImportState.Working(0)
         val app = context.applicationContext
+        // The picker's grant ends with the activity; hold it so leaving the app does not stop the import.
+        val held = runCatching {
+            app.contentResolver.takePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }.isSuccess
         importScope.launch {
             runImport(app) {
                 val staging = stagingDir(app).apply { deleteRecursively() }
-                if (stage(app, staging) == 0) {
+                val count = try {
+                    stage(app, staging)
+                } finally {
+                    if (held) {
+                        runCatching {
+                            app.contentResolver.releasePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                    }
+                }
+                if (count == 0) {
                     staging.deleteRecursively()
                     _importState.value = ImportState.Failed("取り込めるファイルがありませんでした")
                     return@runImport

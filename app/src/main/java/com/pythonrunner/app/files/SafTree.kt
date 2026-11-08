@@ -29,7 +29,8 @@ object SafTree {
                     val name = cursor.getString(1) ?: continue
                     val path = if (prefix.isEmpty()) name else "$prefix/$name"
                     if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
-                        walk(id, path)
+                        // Never descend into .git or venv: thousands of queries for files never imported.
+                        if (name !in BotImporter.SKIPPED_FOLDERS) walk(id, path)
                     } else {
                         val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
                         val size = if (cursor.isNull(3)) 0L else cursor.getLong(3)
