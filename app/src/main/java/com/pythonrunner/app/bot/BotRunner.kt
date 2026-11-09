@@ -13,7 +13,7 @@ class BotRunner(
     private val prepare: () -> Unit,
     private val createProcess: (onLine: (LogLine) -> Unit, onExit: (Int) -> Unit) -> ManagedProcess,
     private val listener: Listener,
-) {
+) : FleetRunner {
     interface Listener {
         fun onStatus(status: BotStatus, sinceMillis: Long?)
         fun onLine(line: LogLine)
@@ -26,10 +26,10 @@ class BotRunner(
     private var process: ManagedProcess? = null
     private var stopRequested = false
 
-    val isActive: Boolean get() = synchronized(lock) { starting || process != null }
+    override val isActive: Boolean get() = synchronized(lock) { starting || process != null }
 
     /** Returns false if the bot is already starting or running. */
-    fun start(): Boolean {
+    override fun start(): Boolean {
         val gen = synchronized(lock) {
             if (starting || process != null) return false
             starting = true
@@ -42,7 +42,7 @@ class BotRunner(
     }
 
     /** Blocks for up to the process's grace period; call it off the main thread. */
-    fun stop() {
+    override fun stop() {
         val p = synchronized(lock) {
             stopRequested = true
             process
