@@ -28,8 +28,16 @@ class FolderSync(
     private val sharedDir: File,
     private val manifestFile: File,
 ) {
+    /**
+     * True when the shared folder is gone although files were synced to it before (deleted on a PC,
+     * say). That is never read as "delete every file": nothing is offered or re-created until [recreate].
+     */
+    val isSharedMissing: Boolean
+        get() = synchronized(LOCK) { !sharedDir.isDirectory && readManifest().isNotEmpty() }
+
     fun pendingImports(): SyncChanges {
         synchronized(LOCK) {
+            if (isSharedMissing) return SyncChanges(emptyList(), emptyList(), emptyList())
             val manifest = readManifest()
             val sharedFiles = files(sharedDir)
             val added = mutableListOf<String>()
@@ -90,6 +98,7 @@ class FolderSync(
 
     fun export() {
         synchronized(LOCK) {
+            if (isSharedMissing) return
             val manifest = readManifest().toMutableMap()
             val privateFiles = files(privateDir)
             for ((path, file) in privateFiles) {
@@ -134,6 +143,8 @@ class FolderSync(
      */
     fun exportForced(paths: Collection<String>) {
         synchronized(LOCK) {
+            // A half-written folder would list every other file as deleted; wait for recreate().
+            if (isSharedMissing) return
             val manifest = readManifest().toMutableMap()
             for (path in paths) {
                 if (isSecret(path.substringAfterLast('/'))) continue
@@ -145,6 +156,42 @@ class FolderSync(
                 manifest[path] = hash(source)
             }
             writeManifest(manifest)
+        }
+    }
+
+    /** Writes the shared folder again from the bot's files (the 「フォルダを作り直す」 button). */
+    fun recreate() {
+        synchronized(LOCK) {
+            writeManifest(emptyMap())
+            export()
+        }
+    }
+
+    /**
+     * Records [paths] as already in sync where the bot's file and the shared one have the same content:
+     * a folder adopted as a bot starts with nothing to bring in.
+     */
+    fun markSynced(paths: Collection<String>) {
+        synchronized(LOCK) {
+            val manifest = readManifest().toMutableMap()
+            for (path in paths) {
+                if (isSecret(path.substringAfterLast('/'))) continue
+                val source = resolveUnder(privateDir, path) ?: continue
+                val target = resolveUnder(sharedDir, path) ?: continue
+                if (!source.isFile || !target.isFile) continue
+                val h = hash(source)
+                if (hash(target) == h) manifest[path] = h
+            }
+            writeManifest(manifest)
+        }
+    }
+
+    /** Where the shared folder stands, for the bot's card. Changes the person declined read as in sync. */
+    fun state(declined: SyncChanges?): SharedState {
+        synchronized(LOCK) {
+            if (isSharedMissing) return SharedState.Missing
+            val changes = pendingImports()
+            return if (changes.isEmpty || changes == declined) SharedState.InSync else SharedState.Changed(changes)
         }
     }
 

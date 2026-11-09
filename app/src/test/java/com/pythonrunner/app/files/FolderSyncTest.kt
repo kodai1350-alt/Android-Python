@@ -207,6 +207,77 @@ class FolderSyncTest {
         assertTrue(sync.pendingImports().isEmpty, sync.pendingImports().toString())
     }
 
+    @Test fun aRemovedSharedFolderIsNotAPendingDeletion() {
+        write(private, "main.py", "x")
+        write(private, "src/a.py", "a")
+        sync.export()
+        assertTrue(shared.deleteRecursively())
+        assertTrue(sync.isSharedMissing)
+        assertTrue(sync.pendingImports().isEmpty)
+        assertEquals(SharedState.Missing, sync.state(null))
+    }
+
+    @Test fun exportDoesNotQuietlyRecreateARemovedFolder() {
+        write(private, "main.py", "x")
+        sync.export()
+        shared.deleteRecursively()
+        sync.export()
+        assertFalse(shared.exists())
+        assertTrue(sync.isSharedMissing)
+    }
+
+    @Test fun recreateWritesTheFolderAgain() {
+        write(private, "main.py", "x")
+        sync.export()
+        shared.deleteRecursively()
+        sync.recreate()
+        assertEquals("x", read(shared, "main.py"))
+        assertFalse(sync.isSharedMissing)
+        assertEquals(SharedState.InSync, sync.state(null))
+    }
+
+    @Test fun forcedExportWaitsForTheFolderToBeRecreated() {
+        write(private, "main.py", "x")
+        write(private, "a.py", "a")
+        sync.export()
+        shared.deleteRecursively()
+        write(private, "a.py", "imported")
+        sync.exportForced(listOf("a.py"))
+        assertFalse(shared.exists())
+        sync.recreate()
+        assertEquals("imported", read(shared, "a.py"))
+        assertEquals("x", read(shared, "main.py"))
+    }
+
+    @Test fun aNewBotsFirstExportStillCreatesTheFolder() {
+        write(private, "main.py", "x")
+        assertFalse(sync.isSharedMissing)
+        sync.export()
+        assertEquals("x", read(shared, "main.py"))
+    }
+
+    @Test fun markSyncedSeedsMatchingFilesOnly() {
+        write(private, "a.py", "same")
+        write(shared, "a.py", "same")
+        write(private, "b.py", "mine")
+        write(shared, "b.py", "theirs")
+        write(private, ".env", "T=1")
+        write(shared, ".env", "T=1")
+        sync.markSynced(listOf("a.py", "b.py", ".env", "../x"))
+        val changes = sync.pendingImports()
+        assertEquals(listOf("b.py"), changes.added)
+        assertTrue(changes.modified.isEmpty() && changes.removed.isEmpty(), changes.toString())
+    }
+
+    @Test fun changedStateCarriesTheChangesUntilDeclined() {
+        write(private, "main.py", "v1")
+        sync.export()
+        write(shared, "main.py", "v2")
+        val changes = sync.pendingImports()
+        assertEquals(SharedState.Changed(changes), sync.state(null))
+        assertEquals(SharedState.InSync, sync.state(changes))
+    }
+
     @Test fun fingerprintChangesWhenASharedFileChanges() {
         write(private, "main.py", "v1")
         sync.export()
