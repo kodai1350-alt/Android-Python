@@ -12,6 +12,7 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.pythonrunner.app.MainActivity
+import com.pythonrunner.app.bot.BotFleet
 import com.pythonrunner.app.bot.BotRunner
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.process.LogLine
@@ -19,143 +20,175 @@ import com.pythonrunner.app.process.ManagedProcess
 import java.io.File
 import kotlin.concurrent.thread
 
-/** Keeps the bot process alive with the screen off: foreground notification plus a partial wake lock. */
+/**
+ * Keeps every running bot alive with the screen off: one foreground notification and a partial wake
+ * lock while at least one bot is active. Each bot is its own process, started and stopped by id.
+ */
 class BotService : Service() {
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
-    // Set by ACTION_RESTART: when the running bot has finished stopping, start it again.
-    @Volatile private var restartRequested = false
 
-    private val runner by lazy {
-        val store = BotController.store(this)
+    private val fleet by lazy {
         val rt = BotController.runtime(this)
-        BotRunner(
-            prepare = {
-                // An import the app did not live to finish is undone first, never run half-applied.
-                BotController.recoverImportNow(this)
-                rt.ensureInstalled()
-            },
-            createProcess = { onLine, onExit ->
-                val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
-                ManagedProcess(
-                    rt.command(File(store.botDir, main).path),
-                    rt.environment(listOf(store.libsDir), store.envVars),
-                    store.botDir, onLine, onExit,
-                )
-            },
-            listener = object : BotRunner.Listener {
-                override fun onStatus(status: BotStatus, sinceMillis: Long?) {
-                    if (status == BotStatus.RUNNING && sinceMillis != null) {
-                        BotController.setRunning(sinceMillis)
-                    } else {
-                        BotController.setStatus(status)
+        BotFleet { id ->
+            BotRunner(
+                prepare = {
+                    // An import the app did not live to finish is undone first, never run half-applied.
+                    BotController.recoverImportNow(this, id)
+                    rt.ensureInstalled()
+                },
+                createProcess = { onLine, onExit ->
+                    val store = BotController.store(this, id)
+                    val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
+                    ManagedProcess(
+                        rt.command(File(store.codeDir, main).path),
+                        rt.environment(listOf(store.libsDir), store.envVars),
+                        store.codeDir, onLine, onExit,
+                    )
+                },
+                listener = object : BotRunner.Listener {
+                    override fun onStatus(status: BotStatus, sinceMillis: Long?) {
+                        if (status == BotStatus.RUNNING && sinceMillis != null) {
+                            BotController.setRunning(id, sinceMillis)
+                        } else {
+                            BotController.setStatus(id, status)
+                        }
                     }
-                }
 
-                override fun onLine(line: LogLine) = BotController.appendLog(line)
+                    override fun onLine(line: LogLine) = BotController.appendLog(id, line)
 
-                override fun onFinished(status: BotStatus, exitCode: Int) = onBotFinished(status, exitCode)
-            },
-        )
+                    override fun onFinished(status: BotStatus, exitCode: Int) = onBotFinished(id, status, exitCode)
+                },
+            )
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        BotController.ensureReady(this)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val id = intent?.getStringExtra(EXTRA_BOT_ID)
         when (intent?.action) {
             ACTION_STOP -> {
-                stopBot()
+                if (id != null) stopBot(id)
                 return START_NOT_STICKY
             }
-            ACTION_START -> startBot()
-            ACTION_RESTART -> restartBot()
-            // Restarted by the system after being killed.
-            null -> if (BotController.store(this).wasRunning) {
-                startBot()
-            } else {
-                stopSelf()
-                return START_NOT_STICKY
+            ACTION_START -> {
+                goForeground()
+                if (id != null) startBot(id)
+                stopIfIdle()
+            }
+            ACTION_RESTART -> {
+                goForeground()
+                if (id != null) restartBot(id)
+                stopIfIdle()
+            }
+            // Restarted by the system after being killed: bring back the bots that were running.
+            null -> {
+                val running = BotController.registry(this).all().filter { BotController.store(this, it.id).wasRunning }
+                if (running.isEmpty()) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                goForeground()
+                running.forEach { startBot(it.id) }
             }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        if (runner.isActive) thread(name = "bot-stop") { runner.stop() }
+        val active = fleet.activeIds()
+        if (active.isNotEmpty()) thread(name = "bot-stop") { active.forEach { fleet.stop(it) } }
         releaseWakeLock()
         super.onDestroy()
     }
 
-    private fun startBot() {
-        // Always go foreground: startForegroundService() requires it even when already running.
-        goForeground()
-        if (!runner.start()) return
+    private fun startBot(id: String) {
+        // A bot deleted meanwhile is not started.
+        if (BotController.registry(this).get(id) == null) return
+        if (!fleet.start(id)) return
         acquireWakeLock()
-        BotController.store(this).wasRunning = true
+        BotController.store(this, id).wasRunning = true
+        updateNotification()
     }
 
-    private fun restartBot() {
-        if (!runner.isActive) {
-            startBot()
-            return
-        }
-        goForeground()
-        restartRequested = true
-        thread(name = "bot-restart") { runner.stop() }
-    }
-
-    private fun stopBot() {
-        restartRequested = false
-        BotController.store(this).wasRunning = false
-        if (runner.isActive) {
-            thread(name = "bot-stop") { runner.stop() }
+    private fun restartBot(id: String) {
+        if (fleet.requestRestart(id)) {
+            thread(name = "bot-restart") { fleet.stopForRestart(id) }
         } else {
-            BotController.setStatus(BotStatus.STOPPED)
-            stopSelf()
+            startBot(id)
         }
     }
 
-    private fun onBotFinished(status: BotStatus, exitCode: Int) {
+    private fun stopBot(id: String) {
+        BotController.store(this, id).wasRunning = false
+        if (fleet.isActive(id)) {
+            thread(name = "bot-stop") { fleet.stop(id) }
+        } else {
+            fleet.takeRestart(id)
+            BotController.setStatus(id, BotStatus.STOPPED)
+            stopIfIdle()
+        }
+    }
+
+    private fun onBotFinished(id: String, status: BotStatus, exitCode: Int) {
         BotController.appendLog(
-            LogLine(System.currentTimeMillis(), "終了しました（終了コード $exitCode）", status == BotStatus.CRASHED),
+            id, LogLine(System.currentTimeMillis(), "終了しました（終了コード $exitCode）", status == BotStatus.CRASHED),
         )
-        if (status == BotStatus.CRASHED) notifyCrash(exitCode)
+        if (status == BotStatus.CRASHED) notifyCrash(id, exitCode)
         // Show what the bot wrote (data files etc.) in the shared copy too.
-        thread(name = "bot-export") { runCatching { BotController.sync(this)?.export() } }
-        if (restartRequested) {
-            restartRequested = false
-            BotController.appendLog(LogLine(System.currentTimeMillis(), "再起動します", false))
-            startBot()
+        thread(name = "bot-export") { runCatching { BotController.sync(this, id)?.export() } }
+        if (fleet.takeRestart(id)) {
+            BotController.appendLog(id, LogLine(System.currentTimeMillis(), "再起動します", false))
+            startBot(id)
             return
         }
-        // A new start may already be under way; leave its wake lock and service alone.
-        if (runner.isActive) return
+        updateNotification()
+        stopIfIdle()
+    }
+
+    /** With no bot left running, the notification, the wake lock and the service go. */
+    private fun stopIfIdle() {
+        if (fleet.activeIds().isNotEmpty()) return
         releaseWakeLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun goForeground() {
-        createChannels()
-        val notification = NotificationCompat.Builder(this, CHANNEL_BOTS)
+    private fun runningNotification() =
+        NotificationCompat.Builder(this, CHANNEL_BOTS)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("Python Runner")
-            .setContentText("Botが稼働中")
+            .setContentText("${fleet.activeIds().size.coerceAtLeast(1)}個のBotが稼働中")
             .setOngoing(true)
             .setContentIntent(openAppIntent())
             .build()
+
+    private fun goForeground() {
+        createChannels()
         val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-        ServiceCompat.startForeground(this, NOTIFICATION_RUNNING, notification, type)
+        ServiceCompat.startForeground(this, NOTIFICATION_RUNNING, runningNotification(), type)
     }
 
-    private fun notifyCrash(code: Int) {
+    private fun updateNotification() {
+        if (fleet.activeIds().isEmpty()) return
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_RUNNING, runningNotification())
+    }
+
+    private fun notifyCrash(id: String, code: Int) {
+        val name = BotController.name(this, id) ?: "Bot"
         val notification = NotificationCompat.Builder(this, CHANNEL_ALERTS)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle("Botがエラーで停止しました")
+            .setContentTitle("『$name』がエラーで停止しました")
             .setContentText("終了コード $code")
             .setAutoCancel(true)
             .setContentIntent(openAppIntent())
             .build()
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_CRASH, notification)
+        getSystemService(NotificationManager::class.java).notify(crashNotificationId(id), notification)
     }
 
     @Synchronized
@@ -186,9 +219,12 @@ class BotService : Service() {
         const val ACTION_START = "com.pythonrunner.app.START"
         const val ACTION_STOP = "com.pythonrunner.app.STOP"
         const val ACTION_RESTART = "com.pythonrunner.app.RESTART"
+        const val EXTRA_BOT_ID = "com.pythonrunner.app.BOT_ID"
         private const val CHANNEL_BOTS = "bots"
         private const val CHANNEL_ALERTS = "alerts"
         private const val NOTIFICATION_RUNNING = 1
-        private const val NOTIFICATION_CRASH = 2
+
+        /** One crash notification per bot, so one bot's error never replaces another's. */
+        fun crashNotificationId(botId: String): Int = 1000 + (botId.hashCode() and 0x7fff)
     }
 }

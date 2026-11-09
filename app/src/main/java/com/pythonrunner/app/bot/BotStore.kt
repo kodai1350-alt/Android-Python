@@ -4,6 +4,12 @@ import java.io.File
 import java.net.URLDecoder
 import java.net.URLEncoder
 
+/** Where a bot's settings are saved (SharedPreferences in the app, a map in tests). */
+interface KeyValue {
+    fun get(key: String): String?
+    fun put(key: String, value: String?)
+}
+
 /**
  * One bot's private files and settings. Everything lives under bots/<id>, which never changes when
  * the bot is renamed: code/ is what runs (other apps cannot change it), libs/ holds its packages.

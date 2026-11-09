@@ -74,6 +74,7 @@ import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
 import com.pythonrunner.app.service.BotController
 import com.pythonrunner.app.service.ImportState
+import com.pythonrunner.app.service.BotRunState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -88,19 +89,21 @@ private const val SELF_CHECK =
 
 /** The trial version's single screen: work through the sections top to bottom to run one bot. */
 @Composable
-fun SpikeScreen() {
+fun SpikeScreen(botId: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val rt = remember { BotController.runtime(context) }
     var hasStorage by remember { mutableStateOf(BotController.hasSharedStorageAccess(context)) }
     // Coming back from the permission screen: re-check, and switch the bot folder if it was granted.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { hasStorage = BotController.hasSharedStorageAccess(context) }
-    val store = remember(hasStorage) { BotController.store(context) }
+    val store = remember(hasStorage) { BotController.store(context, botId) }
     val uiPrefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
 
-    val status by BotController.status.collectAsStateWithLifecycle()
-    val startedAt by BotController.startedAtMillis.collectAsStateWithLifecycle()
-    val botLogs by BotController.logs.collectAsStateWithLifecycle()
+    val runStates by BotController.runStates.collectAsStateWithLifecycle()
+    val run = runStates[botId] ?: BotRunState()
+    val status = run.status
+    val startedAt = run.startedAtMillis
+    val botLogs = run.logs
 
     val workLog = remember { mutableStateListOf<LogLine>() }
     var busy by remember { mutableStateOf(false) }
@@ -124,7 +127,7 @@ fun SpikeScreen() {
         busy = true
         // runOneShot prepends the launcher itself, so drop it from the full command.
         BotController.runOneShot(
-            context, command.drop(1),
+            context, botId, command.drop(1),
             onLine = { line -> scope.launch { workLog += line } },
             onExit = { code -> scope.launch { then(code); if (code != 0) busy = false } },
         )
@@ -135,7 +138,7 @@ fun SpikeScreen() {
         scope.launch {
             // During an import the import itself updates the shared copy.
             if (BotController.importState.value == ImportState.Idle) {
-                withContext(Dispatchers.IO) { runCatching { BotController.sync(context)?.export() } }
+                withContext(Dispatchers.IO) { runCatching { BotController.sync(context, botId)?.export() } }
             }
             filesVersion++
         }
@@ -156,14 +159,14 @@ fun SpikeScreen() {
             exportShared()
             var checked: String? = null
             while (true) {
-                val fingerprint = withContext(Dispatchers.IO) { runCatching { BotController.sync(context)?.fingerprint() }.getOrNull() }
+                val fingerprint = withContext(Dispatchers.IO) { runCatching { BotController.sync(context, botId)?.fingerprint() }.getOrNull() }
                 val busyNow = pendingImport != null || BotController.importState.value != ImportState.Idle
                 if (fingerprint != null && fingerprint != checked && !busyNow) {
                     val changes = withContext(Dispatchers.IO) {
-                        runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
+                        runCatching { BotController.sync(context, botId)?.pendingImports() }.getOrNull()
                     }
                     checked = fingerprint
-                    if (changes != null && !changes.isEmpty && changes != BotController.declinedChanges) {
+                    if (changes != null && !changes.isEmpty && changes != BotController.declinedChanges[botId]) {
                         importThenStart = false
                         pendingImport = changes
                     }
@@ -174,16 +177,15 @@ fun SpikeScreen() {
     }
 
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) BotController.importFile(context, uri)
+        if (uri != null) BotController.importFile(context, uri, botId)
     }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) BotController.importFolder(context, uri)
+        if (uri != null) BotController.importFolder(context, uri, botId)
     }
     val importState by BotController.importState.collectAsStateWithLifecycle()
     val importBusy = importState is ImportState.Working || importState is ImportState.Confirm
     var importNote by remember { mutableStateOf<String?>(null) }
     var askRestart by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { BotController.recoverImport(context) }
     LaunchedEffect(importState) {
         val done = importState as? ImportState.Done ?: return@LaunchedEffect
         // The person just imported these: use their requirements.txt over what the box held.
@@ -209,13 +211,13 @@ fun SpikeScreen() {
     }
 
     val askNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        BotController.start(context)
+        BotController.start(context, botId)
     }
     fun launchBot() {
         if (Build.VERSION.SDK_INT >= 33) {
             askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            BotController.start(context)
+            BotController.start(context, botId)
         }
     }
 
@@ -285,8 +287,8 @@ fun SpikeScreen() {
             val places = remember(hasStorage, store, status) {
                 val storageRoot = Environment.getExternalStorageDirectory()
                 listOfNotNull(
-                    Place(PlaceGroup.BOT, "MyBot（実行用）・${statusText(status)}", store.botDir, isBotFolder = true),
-                    Place(PlaceGroup.SHARED, "MyBot（共有コピー）", BotController.sharedBotDir().takeIf { hasStorage }),
+                    Place(PlaceGroup.BOT, "MyBot（実行用）・${statusText(status)}", store.codeDir, isBotFolder = true),
+                    Place(PlaceGroup.SHARED, "MyBot（共有コピー）", BotController.sharedDir(context, botId)?.takeIf { hasStorage }),
                     Place(PlaceGroup.SHARED, "内部ストレージ", storageRoot.takeIf { hasStorage }),
                     Place(PlaceGroup.SHARED, "Documents", File(storageRoot, Environment.DIRECTORY_DOCUMENTS).takeIf { hasStorage }),
                     Place(PlaceGroup.SHARED, "Download", File(storageRoot, Environment.DIRECTORY_DOWNLOADS).takeIf { hasStorage }),
@@ -342,7 +344,7 @@ fun SpikeScreen() {
             }
             if (askRestart) {
                 RestartDialog(
-                    onRestart = { askRestart = false; BotController.restart(context) },
+                    onRestart = { askRestart = false; BotController.restart(context, botId) },
                     onLater = { askRestart = false },
                 )
             }
@@ -453,7 +455,7 @@ fun SpikeScreen() {
             val running = status == BotStatus.RUNNING || status == BotStatus.STARTING
             if (running) {
                 Button(
-                    onClick = { BotController.stop(context) },
+                    onClick = { BotController.stop(context, botId) },
                     colors = ButtonDefaults.buttonColors(containerColor = Red),
                 ) { Text("停止") }
             } else {
@@ -463,7 +465,7 @@ fun SpikeScreen() {
                     onClick = {
                         scope.launch {
                             val changes = withContext(Dispatchers.IO) {
-                                runCatching { BotController.sync(context)?.pendingImports() }.getOrNull()
+                                runCatching { BotController.sync(context, botId)?.pendingImports() }.getOrNull()
                             }
                             if (changes != null && !changes.isEmpty) {
                                 importThenStart = true
@@ -487,7 +489,7 @@ fun SpikeScreen() {
                     scope.launch {
                         // Files changed again after confirming are not imported: ask again instead of going on.
                         val again = withContext(Dispatchers.IO) {
-                            val sync = BotController.sync(context)
+                            val sync = BotController.sync(context, botId)
                             val skipped = sync?.importChanges(changes).orEmpty()
                             store.forgetMissingMain()  // the file to run first may have been deleted there
                             if (skipped.isEmpty()) null else sync?.pendingImports()
@@ -511,7 +513,7 @@ fun SpikeScreen() {
                 },
                 onCancel = {
                     // 反映しない: not offered again until something else changes (起動 still asks).
-                    if (!importThenStart) BotController.declinedChanges = changes
+                    if (!importThenStart) BotController.declinedChanges[botId] = changes
                     pendingImport = null
                 },
             )
@@ -522,7 +524,7 @@ fun SpikeScreen() {
                 Text("まだログはありません", color = Gray)
             } else {
                 LogView(botLogs, context)
-                OutlinedButton(onClick = { BotController.clearLogs() }) { Text("🗑 ログを消す", color = Red) }
+                OutlinedButton(onClick = { BotController.clearLogs(botId) }) { Text("🗑 ログを消す", color = Red) }
             }
         }
 

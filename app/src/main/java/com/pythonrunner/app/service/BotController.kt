@@ -1,28 +1,38 @@
 package com.pythonrunner.app.service
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import androidx.core.content.ContextCompat
 import com.pythonrunner.app.BuildConfig
+import com.pythonrunner.app.bot.BotEntry
+import com.pythonrunner.app.bot.BotNames
+import com.pythonrunner.app.bot.BotRegistry
 import com.pythonrunner.app.bot.BotStatus
+import com.pythonrunner.app.bot.BotStore
 import com.pythonrunner.app.bot.KeyValue
-import com.pythonrunner.app.bot.SpikeBotStore
+import com.pythonrunner.app.bot.NameCheck
+import com.pythonrunner.app.bot.SpikeMigration
 import com.pythonrunner.app.files.BotImporter
 import com.pythonrunner.app.files.FolderSync
 import com.pythonrunner.app.files.ImportPlan
 import com.pythonrunner.app.files.LeftoverFiles
 import com.pythonrunner.app.files.SafTree
+import com.pythonrunner.app.files.SharedFolders
+import com.pythonrunner.app.files.SharedState
 import com.pythonrunner.app.files.SyncChanges
 import com.pythonrunner.app.process.LogBuffer
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.process.ManagedProcess
 import com.pythonrunner.app.python.PythonRuntime
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CoroutineScope
@@ -39,180 +49,257 @@ sealed interface ImportState {
     data class Working(val percent: Int) : ImportState
     /** Some existing files would be replaced: waiting for 上書きして取り込む. */
     data class Confirm(val plan: ImportPlan) : ImportState
-    data class Done(val count: Int, val requirements: String?, val botWasRunning: Boolean) : ImportState
+    /** A new bot's files are staged: waiting for its name (追加する). */
+    data class ChooseName(val suggested: String, val error: String? = null) : ImportState
+    data class Done(
+        val botId: String,
+        val count: Int,
+        val requirements: String?,
+        val botWasRunning: Boolean,
+        val isNewBot: Boolean,
+    ) : ImportState
     data class Failed(val message: String) : ImportState
 }
 
-/** Shared state between [BotService] and the UI. */
+/** One bot's run state as the screens show it. */
+data class BotRunState(
+    val status: BotStatus = BotStatus.STOPPED,
+    val startedAtMillis: Long? = null,
+    val logs: List<LogLine> = emptyList(),
+)
+
+/** Shared state between [BotService] and the UI, for every bot by id. */
 object BotController {
-    // Imports run here, not in the screen, so turning or leaving the screen does not stop them.
-    private val importScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val _importState = MutableStateFlow<ImportState>(ImportState.Idle)
-    val importState: StateFlow<ImportState> = _importState
-    @Volatile private var importRequirements: String? = null
+    // Imports and deletions run here, not in the screen, so turning or leaving the screen does not stop them.
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    /** Shared-copy changes the user chose not to bring in; not offered again by the automatic check. */
-    @Volatile var declinedChanges: SyncChanges? = null
+    // ---- The bot list ----
 
-    private fun stagingDir(context: Context) = File(context.applicationContext.filesDir, "import-staging")
-    private fun backupDir(context: Context) = File(context.applicationContext.filesDir, "import-backup")
+    private val _bots = MutableStateFlow<List<BotEntry>>(emptyList())
+    /** Every bot, in the order added. */
+    val bots: StateFlow<List<BotEntry>> = _bots
 
-    /** A picked file: a ZIP is extracted, anything else (.py, config.json…) is added as it is. */
-    fun importFile(context: Context, uri: Uri) = startImport(context, uri) { app, staging ->
-        val name = SafTree.displayName(app, uri) ?: "file"
-        val open = { app.contentResolver.openInputStream(uri) ?: error("ファイルを開けませんでした") }
-        if (name.lowercase().endsWith(".zip")) {
-            requireSpace(SafTree.size(app, uri), app.cacheDir)
-            val zip = File(app.cacheDir, "import.zip")
-            try {
-                open().use { input -> zip.outputStream().use { input.copyTo(it) } }
-                requireSpace(BotImporter.zipSize(zip), app.filesDir)
-                // Android 14+ refuses a whole ZIP over one ".." name; BotImporter drops such names itself.
-                if (Build.VERSION.SDK_INT >= 34) dalvik.system.ZipPathValidator.clearCallback()
-                BotImporter.stageZip(zip, staging) { _importState.value = ImportState.Working(it) }
-            } finally {
-                zip.delete()
+    @Volatile private var registry: BotRegistry? = null
+    @Volatile private var ready = false
+
+    private fun botsRoot(context: Context) = File(context.applicationContext.filesDir, "bots")
+
+    fun registry(context: Context): BotRegistry = registry ?: synchronized(this) {
+        registry ?: BotRegistry(File(botsRoot(context), "registry.txt")).also { registry = it }
+    }
+
+    private fun prefs(context: Context, name: String): KeyValue {
+        val prefs = context.applicationContext.getSharedPreferences(name, Context.MODE_PRIVATE)
+        return object : KeyValue {
+            override fun get(key: String): String? = prefs.getString(key, null)
+            override fun put(key: String, value: String?) {
+                prefs.edit().putString(key, value).apply()
             }
+        }
+    }
+
+    /**
+     * Once per process, before any screen or bot: moves the trial version's bot into the list and undoes
+     * imports the app did not live to finish.
+     */
+    @Synchronized
+    fun ensureReady(context: Context) {
+        if (ready) return
+        val app = context.applicationContext
+        runCatching { SpikeMigration.run(app.filesDir, registry(app), prefs(app, "spike"), prefs(app, "bots")) }
+        for (bot in registry(app).all()) {
+            val s = store(app, bot.id)
+            runCatching { BotImporter.recover(s.codeDir, s.backupDir, s.stagingDir) }
+        }
+        newStaging(app).deleteRecursively()
+        refreshBots(app)
+        ready = true
+    }
+
+    private fun refreshBots(context: Context) {
+        _bots.value = registry(context).all()
+    }
+
+    /** The bot's private files and settings. Bot code always runs from here, which other apps cannot modify. */
+    fun store(context: Context, id: String): BotStore = BotStore(id, botsRoot(context), prefs(context, "bots"))
+
+    fun name(context: Context, id: String): String? = registry(context).get(id)?.name
+
+    // ---- Shared folders ----
+
+    fun sharedBotsRoot(): File =
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "PythonRunner")
+
+    /** Documents/PythonRunner/<name>, visible to the Files app and a PC over USB. */
+    fun sharedDir(context: Context, id: String): File? = name(context, id)?.let { File(sharedBotsRoot(), it) }
+
+    /** The bot's shared copy; null without storage access or for an unknown bot. */
+    fun sync(context: Context, id: String): FolderSync? {
+        val app = context.applicationContext
+        if (!hasSharedStorageAccess(app)) return null
+        val dir = sharedDir(app, id) ?: return null
+        val s = store(app, id)
+        return FolderSync(s.codeDir, dir, s.manifestFile)
+    }
+
+    fun hasSharedStorageAccess(context: Context): Boolean =
+        if (Build.VERSION.SDK_INT >= 30) {
+            Environment.isExternalStorageManager()
         } else {
-            requireSpace(SafTree.size(app, uri), app.filesDir)
-            open().use { BotImporter.stageFile(name, it, staging) }
-            1
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
         }
-    }
 
-    /** A picked folder, with everything in it. */
-    fun importFolder(context: Context, treeUri: Uri) = startImport(context, treeUri) { app, staging ->
-        val files = SafTree.list(app, treeUri).filter { !BotImporter.isSkipped(it.path) }
-        requireSpace(files.sumOf { it.size }, app.filesDir)
-        BotImporter.stageTree(files.map { it.path to it.open }, staging) { _importState.value = ImportState.Working(it) }
-    }
+    /** Shared-copy changes the person chose not to bring in, per bot; not shown again while unchanged. */
+    val declinedChanges: MutableMap<String, SyncChanges> = ConcurrentHashMap()
 
-    /** 上書きして取り込む. */
-    fun confirmImport(context: Context) {
-        val plan = (_importState.value as? ImportState.Confirm)?.plan ?: return
-        _importState.value = ImportState.Working(100)
+    private val _sharedStates = MutableStateFlow<Map<String, SharedState>>(emptyMap())
+    val sharedStates: StateFlow<Map<String, SharedState>> = _sharedStates
+    private val _unlistedFolders = MutableStateFlow<List<String>>(emptyList())
+    /** Folders in PythonRunner that belong to no bot (新しいフォルダが見つかりました). */
+    val unlistedFolders: StateFlow<List<String>> = _unlistedFolders
+    private val fingerprints = ConcurrentHashMap<String, String>()
+
+    /** Mirrors every bot's files to its shared copy (never over edits made there). */
+    fun exportAll(context: Context) {
         val app = context.applicationContext
-        importScope.launch { runImport(app) { applyImport(app, plan) } }
+        for (bot in registry(app).all()) {
+            if (bot.id == importingBotId()) continue
+            runCatching { sync(app, bot.id)?.export() }
+        }
     }
 
-    /** やめる on the overwrite question: nothing in the bot folder changes. */
-    fun cancelImport(context: Context) {
-        if (_importState.value !is ImportState.Confirm) return
-        stagingDir(context).deleteRecursively()
-        _importState.value = ImportState.Idle
-    }
-
-    /** The screen has shown the result. */
-    fun finishImport() {
-        val state = _importState.value
-        if (state is ImportState.Done || state is ImportState.Failed) _importState.value = ImportState.Idle
-    }
-
-    /** Before the bot starts: same as [recoverImport], but done now, so it never runs on a half import. */
-    fun recoverImportNow(context: Context) {
-        if (_importState.value != ImportState.Idle) return
+    /**
+     * One pass of the automatic check: each bot's folder is compared in full only when its cheap
+     * fingerprint moved (or the person declined or brought in changes since). Call it off the main thread.
+     */
+    fun checkShared(context: Context) {
         val app = context.applicationContext
-        runCatching { BotImporter.recover(store(app).botDir, backupDir(app), stagingDir(app)) }
+        if (!hasSharedStorageAccess(app)) {
+            _sharedStates.value = emptyMap()
+            _unlistedFolders.value = emptyList()
+            return
+        }
+        val bots = registry(app).all()
+        val states = HashMap(_sharedStates.value)
+        states.keys.retainAll(bots.map { it.id }.toSet())
+        for (bot in bots) {
+            if (bot.id == importingBotId()) continue
+            val sync = sync(app, bot.id) ?: continue
+            val fingerprint = runCatching { sync.fingerprint() }.getOrNull() ?: continue
+            val key = fingerprint + "|" + declinedChanges[bot.id].hashCode()
+            if (fingerprints[bot.id] == key && bot.id in states) continue
+            fingerprints[bot.id] = key
+            states[bot.id] = runCatching { sync.state(declinedChanges[bot.id]) }.getOrDefault(SharedState.InSync)
+        }
+        _sharedStates.value = states
+        _unlistedFolders.value = runCatching { SharedFolders.unlisted(sharedBotsRoot(), bots.map { it.name }) }
+            .getOrDefault(emptyList())
     }
 
-    /** At app start: undo an import the app did not live to finish. */
-    fun recoverImport(context: Context) {
-        if (_importState.value != ImportState.Idle) return
-        val app = context.applicationContext
-        importScope.launch {
-            runCatching { BotImporter.recover(store(app).botDir, backupDir(app), stagingDir(app)) }
+    /** Forgets the last check of [id], so the next pass compares it in full (after 反映する, say). */
+    fun recheck(id: String) {
+        fingerprints.remove(id)
+    }
+
+    /** 「フォルダを作り直す」: writes the bot's shared folder again. */
+    fun recreateShared(context: Context, id: String) {
+        scope.launch {
+            runCatching { sync(context, id)?.recreate() }
+            recheck(id)
+            checkShared(context)
         }
     }
 
-    private fun startImport(context: Context, picked: Uri, stage: (Context, File) -> Int) {
-        val state = _importState.value
-        if (state is ImportState.Working || state is ImportState.Confirm) return
-        _importState.value = ImportState.Working(0)
-        val app = context.applicationContext
-        // The picker's grant ends with the activity; hold it so leaving the app does not stop the import.
-        val held = runCatching {
-            app.contentResolver.takePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }.isSuccess
-        importScope.launch {
-            runImport(app) {
-                val staging = stagingDir(app).apply { deleteRecursively() }
-                val count = try {
-                    stage(app, staging)
-                } finally {
-                    if (held) {
-                        runCatching {
-                            app.contentResolver.releasePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                    }
-                }
-                if (count == 0) {
-                    staging.deleteRecursively()
-                    _importState.value = ImportState.Failed("取り込めるファイルがありませんでした")
-                    return@runImport
-                }
-                val plan = BotImporter.plan(staging, store(app).botDir)
-                importRequirements = BotImporter.requirements(staging)
-                if (plan.overwrites.isEmpty()) applyImport(app, plan) else _importState.value = ImportState.Confirm(plan)
-            }
-        }
-    }
+    // ---- Running bots ----
 
-    private inline fun runImport(app: Context, block: () -> Unit) {
-        try {
-            block()
-        } catch (e: NotEnoughSpace) {
-            stagingDir(app).deleteRecursively()
-            _importState.value = ImportState.Failed(e.message.orEmpty())
-        } catch (e: Exception) {
-            stagingDir(app).deleteRecursively()
-            _importState.value = ImportState.Failed("取り込めませんでした: ${e.message ?: e.javaClass.simpleName}")
-        }
-    }
-
-    private fun applyImport(app: Context, plan: ImportPlan) {
-        val store = store(app)
-        store.botDir.mkdirs()
-        BotImporter.applyPlan(plan, stagingDir(app), store.botDir, backupDir(app))
-        // The shared copy follows at once, so the automatic check does not offer its old files back.
-        runCatching { sync(app)?.exportForced(plan.files) }
-        store.mainFile = BotImporter.pickMain(store.botDir, store.mainFile)
-        val running = status.value == BotStatus.RUNNING || status.value == BotStatus.STARTING
-        _importState.value = ImportState.Done(plan.files.size, importRequirements, running)
-    }
-
-    private class NotEnoughSpace(message: String) : Exception(message)
-
-    private fun requireSpace(needed: Long, dir: File) {
-        val missing = BotImporter.missingBytes(needed, dir.usableSpace)
-        if (missing > 0) {
-            val mb = (missing + 1024 * 1024 - 1) / (1024 * 1024)
-            throw NotEnoughSpace("空き容量が足りません（あと ${mb}MB 必要です）")
-        }
-    }
-
-    /** Frees the space of the AI model a test build downloaded (the AI is set aside for now). */
-    fun removeLeftoverFiles(context: Context) {
-        thread(name = "leftover-cleanup") {
-            runCatching { LeftoverFiles.removeAiModels(context.applicationContext.filesDir) }
-        }
-    }
-
-    private val _status = MutableStateFlow(BotStatus.STOPPED)
-    private val _startedAtMillis = MutableStateFlow<Long?>(null)
-    private val _logs = MutableStateFlow<List<LogLine>>(emptyList())
-    val status: StateFlow<BotStatus> = _status
-    val startedAtMillis: StateFlow<Long?> = _startedAtMillis
-    val logs: StateFlow<List<LogLine>> = _logs
-
-    private val buffer = LogBuffer()
+    private val _runStates = MutableStateFlow<Map<String, BotRunState>>(emptyMap())
+    val runStates: StateFlow<Map<String, BotRunState>> = _runStates
+    private val buffers = ConcurrentHashMap<String, LogBuffer>()
+    private val statuses = ConcurrentHashMap<String, Pair<BotStatus, Long?>>()
     private val logsDirty = AtomicBoolean(false)
 
     init {
         // Publish log snapshots at most four times a second.
         CoroutineScope(Dispatchers.Default).launch {
             while (true) {
-                if (logsDirty.getAndSet(false)) _logs.value = buffer.snapshot()
+                if (logsDirty.getAndSet(false)) publish()
                 delay(250)
+            }
+        }
+    }
+
+    @Synchronized
+    private fun publish() {
+        val ids = statuses.keys + buffers.keys
+        _runStates.value = ids.associateWith { id ->
+            val (status, since) = statuses[id] ?: (BotStatus.STOPPED to null)
+            BotRunState(status, since, buffers[id]?.snapshot().orEmpty())
+        }
+    }
+
+    fun runState(id: String): BotRunState = _runStates.value[id] ?: BotRunState()
+
+    internal fun setStatus(id: String, status: BotStatus) {
+        statuses[id] = status to null
+        publish()
+    }
+
+    internal fun setRunning(id: String, sinceMillis: Long) {
+        statuses[id] = BotStatus.RUNNING to sinceMillis
+        publish()
+    }
+
+    internal fun appendLog(id: String, line: LogLine) {
+        buffers.getOrPut(id) { LogBuffer() }.add(line)
+        logsDirty.set(true)
+    }
+
+    /** Empties the bot's log (the bot keeps running). */
+    fun clearLogs(id: String) {
+        buffers[id]?.clear()
+        publish()
+    }
+
+    fun isRunning(id: String): Boolean = runState(id).status.let { it == BotStatus.RUNNING || it == BotStatus.STARTING }
+
+    fun start(context: Context, id: String) = send(context, BotService.ACTION_START, id, foreground = true)
+
+    /** Stops the bot and starts it again, so files changed while it ran are used. */
+    fun restart(context: Context, id: String) = send(context, BotService.ACTION_RESTART, id, foreground = true)
+
+    fun stop(context: Context, id: String) = send(context, BotService.ACTION_STOP, id, foreground = false)
+
+    private fun send(context: Context, action: String, id: String, foreground: Boolean) {
+        val intent = Intent(context, BotService::class.java).setAction(action).putExtra(BotService.EXTRA_BOT_ID, id)
+        if (foreground) ContextCompat.startForegroundService(context, intent) else context.startService(intent)
+    }
+
+    /** True while a one-shot job (preparing Python, pip) runs; only one runs at a time in the whole app. */
+    val workBusy = MutableStateFlow(false)
+
+    /**
+     * Runs Python once without the service (pip, self-check), in bot [botId]'s folder with its packages,
+     * or in the app's home folder when null.
+     */
+    fun runOneShot(context: Context, botId: String?, args: List<String>, onLine: (LogLine) -> Unit, onExit: (Int) -> Unit) {
+        val app = context.applicationContext
+        val rt = runtime(app)
+        val s = botId?.let { store(app, it) }
+        thread(name = "python-oneshot") {
+            try {
+                rt.ensureInstalled()
+                val dir = s?.codeDir ?: File(app.filesDir, "home")
+                dir.mkdirs()
+                ManagedProcess(
+                    rt.command(*args.toTypedArray()),
+                    // No user secrets here: pip may run arbitrary build backends from PyPI.
+                    rt.environment(listOfNotNull(s?.libsDir), emptyMap()),
+                    dir, onLine, onExit,
+                ).start()
+            } catch (e: Exception) {
+                onLine(LogLine(System.currentTimeMillis(), "実行できませんでした: ${e.message}", true))
+                onExit(-1)
             }
         }
     }
@@ -231,96 +318,299 @@ object BotController {
         }.also { runtime = it }
     }
 
-    /** The bot always runs from app-private storage, which other apps cannot modify. */
-    fun store(context: Context): SpikeBotStore {
-        val app = context.applicationContext
-        val prefs = app.getSharedPreferences("spike", Context.MODE_PRIVATE)
-        return SpikeBotStore(app.filesDir, object : KeyValue {
-            override fun get(key: String): String? = prefs.getString(key, null)
-            override fun put(key: String, value: String?) {
-                prefs.edit().putString(key, value).apply()
+    // ---- Imports: into a bot, as a new bot, or adopting a found folder ----
+
+    private sealed interface Target {
+        data class Existing(val id: String) : Target
+        data object NewBot : Target
+        data class Adopt(val folder: String) : Target
+    }
+
+    private val _importState = MutableStateFlow<ImportState>(ImportState.Idle)
+    val importState: StateFlow<ImportState> = _importState
+    @Volatile private var target: Target? = null
+    @Volatile private var importRequirements: String? = null
+
+    /** An import is under way somewhere in the app; only one runs at a time. */
+    val importBusy: Boolean
+        get() = _importState.value.let { it is ImportState.Working || it is ImportState.Confirm || it is ImportState.ChooseName }
+
+    /** The bot whose folder an import is changing right now, if any. */
+    fun importingBotId(): String? = if (importBusy) (target as? Target.Existing)?.id else null
+
+    private fun newStaging(context: Context) = File(botsRoot(context), "new-staging")
+
+    private fun stagingFor(context: Context, t: Target?): File =
+        if (t is Target.Existing) store(context, t.id).stagingDir else newStaging(context)
+
+    /** A picked file into bot [botId], or a new bot when null: a ZIP is extracted, anything else added as it is. */
+    fun importFile(context: Context, uri: Uri, botId: String?) =
+        startImport(context, uri, botId?.let { Target.Existing(it) } ?: Target.NewBot) { app, staging ->
+            val name = SafTree.displayName(app, uri) ?: "file"
+            val open = { app.contentResolver.openInputStream(uri) ?: error("ファイルを開けませんでした") }
+            pickedName = name
+            if (name.lowercase().endsWith(".zip")) {
+                requireSpace(SafTree.size(app, uri), app.cacheDir)
+                val zip = File(app.cacheDir, "import.zip")
+                try {
+                    open().use { input -> zip.outputStream().use { input.copyTo(it) } }
+                    requireSpace(BotImporter.zipSize(zip), app.filesDir)
+                    // Android 14+ refuses a whole ZIP over one ".." name; BotImporter drops such names itself.
+                    if (Build.VERSION.SDK_INT >= 34) dalvik.system.ZipPathValidator.clearCallback()
+                    BotImporter.stageZip(zip, staging) { _importState.value = ImportState.Working(it) }
+                } finally {
+                    zip.delete()
+                }
+            } else {
+                requireSpace(SafTree.size(app, uri), app.filesDir)
+                open().use { BotImporter.stageFile(name, it, staging) }
+                1
             }
-        })
-    }
+        }
 
-    /** The shared copy for the Files app and a PC; null without storage access. */
-    fun sync(context: Context): FolderSync? {
+    /** A picked folder, with everything in it, into bot [botId], or a new bot when null. */
+    fun importFolder(context: Context, treeUri: Uri, botId: String?) =
+        startImport(context, treeUri, botId?.let { Target.Existing(it) } ?: Target.NewBot) { app, staging ->
+            pickedName = runCatching {
+                SafTree.displayName(
+                    app, DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri)),
+                )
+            }.getOrNull() ?: "Bot"
+            val files = SafTree.list(app, treeUri).filter { !BotImporter.isSkipped(it.path) }
+            requireSpace(files.sumOf { it.size }, app.filesDir)
+            BotImporter.stageTree(files.map { it.path to it.open }, staging) { _importState.value = ImportState.Working(it) }
+        }
+
+    /** 「追加する」 on a folder found in PythonRunner: it becomes the new bot's shared folder as it is. */
+    fun adoptFolder(context: Context, folderName: String) {
+        if (importBusy) return
         val app = context.applicationContext
-        if (!hasSharedStorageAccess(app)) return null
-        return FolderSync(store(app).botDir, sharedBotDir(), File(app.filesDir, "bots/spike-shared.manifest"))
+        val folder = File(sharedBotsRoot(), folderName)
+        target = Target.Adopt(folderName)
+        _importState.value = ImportState.Working(0)
+        scope.launch {
+            runImport(app) {
+                val staging = newStaging(app).apply { deleteRecursively() }
+                val files = SharedFolders.adoptableFiles(folder)
+                requireSpace(files.sumOf { File(folder, it).length() }, app.filesDir)
+                val count = BotImporter.stageTree(files.map { path -> path to { File(folder, path).inputStream() } }, staging) {
+                    _importState.value = ImportState.Working(it)
+                }
+                importRequirements = BotImporter.requirements(staging)
+                // An empty folder still becomes a bot; its files can be added later.
+                if (count == 0) staging.mkdirs()
+                _importState.value = ImportState.ChooseName(folderName)
+            }
+        }
     }
 
-    /** Documents/PythonRunner/<bot>, visible to the Files app and a PC over USB. */
-    fun sharedBotDir(): File = File(sharedBotsRoot(), BOT_FOLDER_NAME)
+    @Volatile private var pickedName: String = "Bot"
 
-    fun sharedBotsRoot(): File =
-        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "PythonRunner")
+    private fun startImport(context: Context, picked: Uri, t: Target, stage: (Context, File) -> Int) {
+        if (importBusy) return
+        target = t
+        _importState.value = ImportState.Working(0)
+        val app = context.applicationContext
+        // The picker's grant ends with the activity; hold it so leaving the app does not stop the import.
+        val held = runCatching {
+            app.contentResolver.takePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }.isSuccess
+        scope.launch {
+            runImport(app) {
+                val staging = stagingFor(app, t).apply { deleteRecursively() }
+                val count = try {
+                    stage(app, staging)
+                } finally {
+                    if (held) {
+                        runCatching {
+                            app.contentResolver.releasePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                    }
+                }
+                if (count == 0) {
+                    staging.deleteRecursively()
+                    _importState.value = ImportState.Failed("取り込めるファイルがありませんでした")
+                    return@runImport
+                }
+                importRequirements = BotImporter.requirements(staging)
+                when (t) {
+                    is Target.Existing -> {
+                        val plan = BotImporter.plan(staging, store(app, t.id).codeDir)
+                        if (plan.overwrites.isEmpty()) applyImport(app, t.id, plan) else _importState.value = ImportState.Confirm(plan)
+                    }
+                    else -> _importState.value = ImportState.ChooseName(BotNames.suggest(pickedName, registry(app).all().map { it.name }))
+                }
+            }
+        }
+    }
 
-    fun hasSharedStorageAccess(context: Context): Boolean =
-        if (Build.VERSION.SDK_INT >= 30) {
-            Environment.isExternalStorageManager()
+    private inline fun runImport(app: Context, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: NotEnoughSpace) {
+            stagingFor(app, target).deleteRecursively()
+            _importState.value = ImportState.Failed(e.message.orEmpty())
+        } catch (e: Exception) {
+            stagingFor(app, target).deleteRecursively()
+            _importState.value = ImportState.Failed("取り込めませんでした: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    /** 上書きして取り込む. */
+    fun confirmImport(context: Context) {
+        val plan = (_importState.value as? ImportState.Confirm)?.plan ?: return
+        val id = (target as? Target.Existing)?.id ?: return
+        _importState.value = ImportState.Working(100)
+        val app = context.applicationContext
+        scope.launch { runImport(app) { applyImport(app, id, plan) } }
+    }
+
+    private fun applyImport(app: Context, id: String, plan: ImportPlan) {
+        val s = store(app, id)
+        s.codeDir.mkdirs()
+        BotImporter.applyPlan(plan, s.stagingDir, s.codeDir, s.backupDir)
+        // The shared copy follows at once, so the automatic check does not offer its old files back.
+        runCatching { sync(app, id)?.exportForced(plan.files) }
+        recheck(id)
+        s.mainFile = BotImporter.pickMain(s.codeDir, s.mainFile)
+        _importState.value = ImportState.Done(id, plan.files.size, importRequirements, isRunning(id), isNewBot = false)
+    }
+
+    /** 「追加する」 with the name typed for a new or adopted bot. */
+    fun confirmName(context: Context, raw: String) {
+        if (_importState.value !is ImportState.ChooseName) return
+        val app = context.applicationContext
+        val t = target
+        val adopting = (t as? Target.Adopt)?.folder
+        val names = registry(app).all().map { it.name }
+        val unlisted = if (hasSharedStorageAccess(app)) {
+            SharedFolders.unlisted(sharedBotsRoot(), names).filter { !it.equals(adopting, ignoreCase = false) }
         } else {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
-                PackageManager.PERMISSION_GRANTED
+            emptyList()
         }
-
-    private const val BOT_FOLDER_NAME = "MyBot"
-
-    fun start(context: Context) {
-        val intent = Intent(context, BotService::class.java).setAction(BotService.ACTION_START)
-        ContextCompat.startForegroundService(context, intent)
-    }
-
-    /** Stops the bot and starts it again, so files changed while it ran are used. */
-    fun restart(context: Context) {
-        val intent = Intent(context, BotService::class.java).setAction(BotService.ACTION_RESTART)
-        ContextCompat.startForegroundService(context, intent)
-    }
-
-    fun stop(context: Context) {
-        context.startService(Intent(context, BotService::class.java).setAction(BotService.ACTION_STOP))
-    }
-
-    /** Runs Python once without the service (pip, self-check). */
-    fun runOneShot(context: Context, args: List<String>, onLine: (LogLine) -> Unit, onExit: (Int) -> Unit) {
-        val rt = runtime(context)
-        val store = store(context)
-        thread(name = "python-oneshot") {
+        val name = when (val check = BotNames.check(raw, names, unlisted)) {
+            is NameCheck.Invalid -> {
+                _importState.value = ImportState.ChooseName(raw, check.message)
+                return
+            }
+            is NameCheck.Ok -> check.name
+        }
+        _importState.value = ImportState.Working(100)
+        scope.launch {
+            if (adopting != null && adopting != name && !SharedFolders.rename(sharedBotsRoot(), adopting, name)) {
+                _importState.value = ImportState.ChooseName(raw, "フォルダの名前を変えられませんでした")
+                return@launch
+            }
+            val entry = registry(app).add(name)
+            val s = store(app, entry.id)
             try {
-                rt.ensureInstalled()
-                store.botDir.mkdirs()
-                ManagedProcess(
-                    rt.command(*args.toTypedArray()),
-                    // No user secrets here: pip may run arbitrary build backends from PyPI.
-                    rt.environment(listOf(store.libsDir), emptyMap()),
-                    store.botDir, onLine, onExit,
-                ).start()
+                val staging = newStaging(app)
+                s.codeDir.mkdirs()
+                val plan = BotImporter.plan(staging, s.codeDir)
+                BotImporter.applyPlan(plan, staging, s.codeDir, s.backupDir)
+                runCatching {
+                    val sync = sync(app, entry.id)
+                    if (adopting != null) sync?.markSynced(plan.files) else sync?.exportForced(plan.files)
+                }
+                s.mainFile = BotImporter.pickMain(s.codeDir, null)
+                refreshBots(app)
+                _importState.value = ImportState.Done(entry.id, plan.files.size, importRequirements, false, isNewBot = true)
             } catch (e: Exception) {
-                onLine(LogLine(System.currentTimeMillis(), "実行できませんでした: ${e.message}", true))
-                onExit(-1)
+                // Never leave a half-made bot in the list.
+                registry(app).remove(entry.id)
+                s.deleteAll()
+                newStaging(app).deleteRecursively()
+                refreshBots(app)
+                _importState.value = ImportState.Failed("追加できませんでした: ${e.message ?: e.javaClass.simpleName}")
             }
         }
     }
 
-    internal fun setStatus(status: BotStatus) {
-        _status.value = status
-        if (status != BotStatus.RUNNING) _startedAtMillis.value = null
+    /** やめる: nothing in any bot folder or shared folder changes. */
+    fun cancelImport(context: Context) {
+        val state = _importState.value
+        if (state !is ImportState.Confirm && state !is ImportState.ChooseName) return
+        val app = context.applicationContext
+        val staging = stagingFor(app, target)
+        _importState.value = ImportState.Idle
+        scope.launch { staging.deleteRecursively() }
     }
 
-    internal fun setRunning(sinceMillis: Long) {
-        _startedAtMillis.value = sinceMillis
-        _status.value = BotStatus.RUNNING
+    /** The screen has shown the result. */
+    fun finishImport() {
+        val state = _importState.value
+        if (state is ImportState.Done || state is ImportState.Failed) _importState.value = ImportState.Idle
     }
 
-    /** Empties the log shown in "6. ログ" (the bot keeps running). */
-    fun clearLogs() {
-        buffer.clear()
-        logsDirty.set(false)
-        _logs.value = emptyList()
+    /** Before a bot starts: an import it did not live to finish is undone, so it never runs half-applied. */
+    fun recoverImportNow(context: Context, id: String) {
+        if (importingBotId() == id) return
+        val s = store(context.applicationContext, id)
+        runCatching { BotImporter.recover(s.codeDir, s.backupDir, s.stagingDir) }
     }
 
-    internal fun appendLog(line: LogLine) {
-        buffer.add(line)
-        logsDirty.set(true)
+    private class NotEnoughSpace(message: String) : Exception(message)
+
+    private fun requireSpace(needed: Long, dir: File) {
+        val missing = BotImporter.missingBytes(needed, dir.usableSpace)
+        if (missing > 0) {
+            val mb = (missing + 1024 * 1024 - 1) / (1024 * 1024)
+            throw NotEnoughSpace("空き容量が足りません（あと ${mb}MB 必要です）")
+        }
+    }
+
+    // ---- Renaming and deleting ----
+
+    /** Renames bot [id] and its shared folder; returns why it could not, or null when done. */
+    fun renameBot(context: Context, id: String, raw: String): String? {
+        val app = context.applicationContext
+        val current = name(app, id) ?: return "Botが見つかりません"
+        val others = registry(app).all().filter { it.id != id }.map { it.name }
+        val access = hasSharedStorageAccess(app)
+        val unlisted = if (access) SharedFolders.unlisted(sharedBotsRoot(), others + current) else emptyList()
+        val name = when (val check = BotNames.check(raw, others, unlisted)) {
+            is NameCheck.Invalid -> return check.message
+            is NameCheck.Ok -> check.name
+        }
+        if (name == current) return null
+        if (access && File(sharedBotsRoot(), current).isDirectory && !SharedFolders.rename(sharedBotsRoot(), current, name)) {
+            return "フォルダの名前を変えられませんでした"
+        }
+        registry(app).rename(id, name)
+        refreshBots(app)
+        recheck(id)
+        return null
+    }
+
+    /**
+     * Deletes bot [id]: stops it, then removes its private files, packages and secrets, its shared folder
+     * when [deleteFolder], and its place in the list.
+     */
+    fun deleteBot(context: Context, id: String, deleteFolder: Boolean) {
+        val app = context.applicationContext
+        val folder = sharedDir(app, id)
+        if (isRunning(id)) stop(app, id)
+        scope.launch {
+            val until = System.currentTimeMillis() + 10_000
+            while (isRunning(id) && System.currentTimeMillis() < until) delay(200)
+            store(app, id).deleteAll()
+            if (deleteFolder && folder != null && hasSharedStorageAccess(app)) runCatching { folder.deleteRecursively() }
+            registry(app).remove(id)
+            declinedChanges.remove(id)
+            fingerprints.remove(id)
+            buffers.remove(id)
+            statuses.remove(id)
+            publish()
+            app.getSystemService(NotificationManager::class.java).cancel(BotService.crashNotificationId(id))
+            refreshBots(app)
+            checkShared(app)
+        }
+    }
+
+    /** Frees the space of the AI model a test build downloaded (the AI is set aside for now). */
+    fun removeLeftoverFiles(context: Context) {
+        thread(name = "leftover-cleanup") {
+            runCatching { LeftoverFiles.removeAiModels(context.applicationContext.filesDir) }
+        }
     }
 }

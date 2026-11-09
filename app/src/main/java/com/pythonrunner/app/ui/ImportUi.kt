@@ -13,6 +13,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,7 +43,13 @@ fun ImportButton(enabled: Boolean, onPickFile: () -> Unit, onPickFolder: () -> U
 
 /** Progress, the overwrite question and failures of an import. Done is handled by the screen. */
 @Composable
-fun ImportStateView(state: ImportState, onConfirm: () -> Unit, onCancel: () -> Unit, onClose: () -> Unit) {
+fun ImportStateView(
+    state: ImportState,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+    onClose: () -> Unit,
+    onName: (String) -> Unit = {},
+) {
     when (state) {
         is ImportState.Working -> Column(Modifier.fillMaxWidth()) {
             Text("取り込み中 ${state.percent}%", fontSize = 13.sp)
@@ -65,8 +72,28 @@ fun ImportStateView(state: ImportState, onConfirm: () -> Unit, onCancel: () -> U
             Text(state.message, color = Color(0xFFE03131), fontSize = 13.sp)
             TextButton(onClick = onClose) { Text("閉じる") }
         }
+        is ImportState.ChooseName -> ChooseNameDialog(state, onConfirm = onName, onCancel = onCancel)
         ImportState.Idle, is ImportState.Done -> Unit
     }
+}
+
+/** The new bot's name, prefilled from the picked file or folder; the folder in PythonRunner gets it too. */
+@Composable
+fun ChooseNameDialog(state: ImportState.ChooseName, onConfirm: (String) -> Unit, onCancel: () -> Unit) {
+    var name by remember(state) { mutableStateOf(state.suggested) }
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("Botの名前") },
+        text = {
+            Column {
+                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("名前") })
+                Text("ドキュメント › PythonRunner › ${name.trim()} に置かれます", fontSize = 12.sp, color = Color.DarkGray)
+                state.error?.let { Text(it, color = Color(0xFFE03131), fontSize = 13.sp) }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(name) }) { Text("追加する") } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("やめる") } },
+    )
 }
 
 /** Files changed under a running bot: it keeps the old code until it starts again. */
