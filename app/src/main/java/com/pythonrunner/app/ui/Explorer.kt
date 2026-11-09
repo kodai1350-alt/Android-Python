@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pythonrunner.app.files.FileEntry
 import com.pythonrunner.app.files.FileTree
+import com.pythonrunner.app.files.FolderSync
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -139,6 +140,7 @@ fun Explorer(
                                 showDate = !navOpen,
                                 isMain = place.isBotFolder && entry.relativePath == mainFile,
                                 canBeMain = place.isBotFolder,
+                                appOnly = place.isBotFolder && !entry.isDirectory && FolderSync.isSecret(entry.name),
                                 deletable = place.isBotFolder,
                                 canDelete = onDelete != null,
                                 onOpen = { path = entry.relativePath },
@@ -204,6 +206,8 @@ private fun EntryRow(
     showDate: Boolean,
     isMain: Boolean,
     canBeMain: Boolean,
+    /** A secret-looking file: it stays in the app and is never copied to the shared folder. */
+    appOnly: Boolean,
     deletable: Boolean,
     canDelete: Boolean,
     onOpen: () -> Unit,
@@ -226,6 +230,9 @@ private fun EntryRow(
                     entry.name, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal,
                 )
+                if (appOnly) {
+                    Text("🔒 アプリの中だけ（フォルダには出ません）", color = Muted, fontSize = 10.sp, maxLines = 2)
+                }
                 if (isMain) {
                     // One line always: wrapped, it stood one character per line and squeezed the name.
                     Text(
