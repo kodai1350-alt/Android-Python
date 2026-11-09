@@ -173,7 +173,12 @@ object BotController {
      * One pass of the automatic check: each bot's folder is compared in full only when its cheap
      * fingerprint moved (or the person declined or brought in changes since). Call it off the main thread.
      */
-    fun checkShared(context: Context) {
+    // Its own lock: a pass hashes files, and must not hold up status updates that lock the controller.
+    private val checkLock = Any()
+
+    fun checkShared(context: Context) = synchronized(checkLock) { checkSharedLocked(context) }
+
+    private fun checkSharedLocked(context: Context) {
         val app = context.applicationContext
         if (!hasSharedStorageAccess(app)) {
             _sharedStates.value = emptyMap()
@@ -438,7 +443,11 @@ object BotController {
                         val plan = BotImporter.plan(staging, store(app, t.id).codeDir)
                         if (plan.overwrites.isEmpty()) applyImport(app, t.id, plan) else _importState.value = ImportState.Confirm(plan)
                     }
-                    else -> _importState.value = ImportState.ChooseName(BotNames.suggest(pickedName, registry(app).all().map { it.name }))
+                    else -> {
+                        val names = registry(app).all().map { it.name }
+                        val folders = if (hasSharedStorageAccess(app)) SharedFolders.unlisted(sharedBotsRoot(), names) else emptyList()
+                        _importState.value = ImportState.ChooseName(BotNames.suggest(pickedName, names + folders))
+                    }
                 }
             }
         }
@@ -490,7 +499,12 @@ object BotController {
         }
         val name = when (val check = BotNames.check(raw, names, unlisted)) {
             is NameCheck.Invalid -> {
-                _importState.value = ImportState.ChooseName(raw, check.message)
+                val hint = if (adopting == null && unlisted.any { it.equals(raw.trim(), ignoreCase = true) }) {
+                    "（このフォルダはホーム画面の『新しいフォルダが見つかりました』から追加できます）"
+                } else {
+                    ""
+                }
+                _importState.value = ImportState.ChooseName(raw, check.message + hint)
                 return
             }
             is NameCheck.Ok -> check.name
@@ -573,6 +587,8 @@ object BotController {
             is NameCheck.Ok -> check.name
         }
         if (name == current) return null
+        // Without access the folder cannot follow the name; it would turn up later as someone else's.
+        if (!access && store(app, id).manifestFile.length() > 0) return "ストレージへのアクセスを許可してから変えてください"
         if (access && File(sharedBotsRoot(), current).isDirectory && !SharedFolders.rename(sharedBotsRoot(), current, name)) {
             return "フォルダの名前を変えられませんでした"
         }
@@ -589,20 +605,25 @@ object BotController {
     fun deleteBot(context: Context, id: String, deleteFolder: Boolean) {
         val app = context.applicationContext
         val folder = sharedDir(app, id)
+        val sync = sync(app, id)
+        val store = store(app, id)
+        // Out of the list first: from here on no export, check, start or import can reach the bot.
+        registry(app).remove(id)
+        refreshBots(app)
         if (isRunning(id)) stop(app, id)
         scope.launch {
             val until = System.currentTimeMillis() + 10_000
             while (isRunning(id) && System.currentTimeMillis() < until) delay(200)
-            store(app, id).deleteAll()
+            // What was synced goes before the files, so their vanishing never deletes shared copies.
+            if (sync != null) sync.forget() else store.manifestFile.delete()
+            store.deleteAll()
             if (deleteFolder && folder != null && hasSharedStorageAccess(app)) runCatching { folder.deleteRecursively() }
-            registry(app).remove(id)
             declinedChanges.remove(id)
             fingerprints.remove(id)
             buffers.remove(id)
             statuses.remove(id)
             publish()
             app.getSystemService(NotificationManager::class.java).cancel(BotService.crashNotificationId(id))
-            refreshBots(app)
             checkShared(app)
         }
     }

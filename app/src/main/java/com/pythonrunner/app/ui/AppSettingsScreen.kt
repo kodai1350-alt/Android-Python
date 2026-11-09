@@ -29,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -66,7 +67,14 @@ fun AppSettingsScreen(onBack: () -> Unit) {
         BotController.runOneShot(
             context, null, command.drop(1),
             onLine = { line -> scope.launch { workLog += line } },
-            onExit = { code -> scope.launch { then(code); if (code != 0) BotController.workBusy.value = false } },
+            // On the main thread, not the screen's scope: leaving the screen mid-job must still run the next
+            // step and clear the busy flag, or every pip and 取り込む button would stay disabled.
+            onExit = { code ->
+                ContextCompat.getMainExecutor(context).execute {
+                    then(code)
+                    if (code != 0) BotController.workBusy.value = false
+                }
+            },
         )
     }
 

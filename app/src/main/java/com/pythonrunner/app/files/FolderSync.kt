@@ -159,6 +159,14 @@ class FolderSync(
         }
     }
 
+    /**
+     * Drops what was synced, first when a bot is deleted: files vanishing from the bot afterwards are
+     * never read as "the bot deleted these", so the shared folder keeps every file.
+     */
+    fun forget() {
+        synchronized(LOCK) { manifestFile.delete() }
+    }
+
     /** Writes the shared folder again from the bot's files (the 「フォルダを作り直す」 button). */
     fun recreate() {
         synchronized(LOCK) {
@@ -203,10 +211,11 @@ class FolderSync(
 
     private fun files(dir: File): Map<String, File> =
         dir.walkTopDown()
-            .onEnter { it == dir || it.name != "__pycache__" }
+            // Caches, version control and virtual environments are never shared, offered or brought in.
+            .onEnter { it == dir || it.name !in BotImporter.SKIPPED_FOLDERS }
             .filter { it.isFile && !isSecret(it.name) }
             .associateBy { it.relativeTo(dir).invariantSeparatorsPath }
-            .filterKeys { isSafePath(it) }
+            .filterKeys { isSafePath(it) && !BotImporter.isSkipped(it) }
 
     private fun readManifest(): Map<String, String> =
         if (!manifestFile.isFile) emptyMap()

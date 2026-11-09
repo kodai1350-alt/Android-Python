@@ -249,6 +249,31 @@ class FolderSyncTest {
         assertEquals("x", read(shared, "main.py"))
     }
 
+    @Test fun forgetKeepsSharedFilesWhileTheBotsFilesAreDeleted() {
+        // Deleting a bot ("フォルダは残す") must never read its vanishing files as "the bot deleted these".
+        write(private, "main.py", "x")
+        write(private, "src/a.py", "a")
+        sync.export()
+        sync.forget()
+        private.deleteRecursively()
+        sync.export()
+        assertEquals("x", read(shared, "main.py"))
+        assertEquals("a", read(shared, "src/a.py"))
+    }
+
+    @Test fun gitAndVirtualEnvFoldersAreNeverSyncedOrOffered() {
+        // A bot folder cloned on a PC: adopting it must not show every git object as "added".
+        write(private, "bot.py", "b")
+        write(shared, "bot.py", "b")
+        listOf(".git/objects/ab/cd", "venv/lib/x.py", ".venv/y.py", "__MACOSX/._bot.py", ".DS_Store", "src/.DS_Store")
+            .forEach { write(shared, it, "junk") }
+        sync.markSynced(listOf("bot.py"))
+        assertTrue(sync.pendingImports().isEmpty, sync.pendingImports().toString())
+        write(private, ".git/HEAD", "ref")
+        sync.export()
+        assertEquals(SharedState.InSync, sync.state(null))
+    }
+
     @Test fun aNewBotsFirstExportStillCreatesTheFolder() {
         write(private, "main.py", "x")
         assertFalse(sync.isSharedMissing)

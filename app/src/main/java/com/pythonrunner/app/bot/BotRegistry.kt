@@ -1,6 +1,7 @@
 package com.pythonrunner.app.bot
 
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.security.SecureRandom
 
@@ -44,7 +45,11 @@ class BotRegistry(private val file: File) {
     private fun save(entries: List<BotEntry>) {
         file.parentFile?.mkdirs()
         val tmp = File(file.path + ".tmp")
-        tmp.writeText(entries.joinToString("") { "${it.id}\t${it.name}\n" })
+        // Flushed to the disk before the rename: a power cut must never leave an empty list.
+        FileOutputStream(tmp).use { out ->
+            out.write(entries.joinToString("") { "${it.id}\t${it.name}\n" }.toByteArray())
+            out.fd.sync()
+        }
         // renameTo does not replace an existing file on every platform; File.delete + rename would leave
         // a moment with no list at all, so fall back to copying over it.
         if (!tmp.renameTo(file)) {

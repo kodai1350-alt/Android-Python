@@ -72,10 +72,8 @@ class BotService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val id = intent?.getStringExtra(EXTRA_BOT_ID)
         when (intent?.action) {
-            ACTION_STOP -> {
-                if (id != null) stopBot(id)
-                return START_NOT_STICKY
-            }
+            // Sticky still: Android keeps the latest answer, and the other bots must come back after a kill.
+            ACTION_STOP -> if (id != null) stopBot(id)
             ACTION_START -> {
                 goForeground()
                 if (id != null) startBot(id)

@@ -61,12 +61,13 @@ class BotRunner(
         var failure: Exception? = null
         synchronized(lock) {
             if (gen != generation || stopRequested) return@synchronized
-            val p = createProcess(listener::onLine) { code -> finish(gen, code) }
-            process = p
-            starting = false
-            // Published before start() so an immediate exit cannot be overwritten by RUNNING.
-            listener.onStatus(BotStatus.RUNNING, System.currentTimeMillis())
             try {
+                // Creating the process can fail too (no main file): that ends this bot, never the app.
+                val p = createProcess(listener::onLine) { code -> finish(gen, code) }
+                process = p
+                starting = false
+                // Published before start() so an immediate exit cannot be overwritten by RUNNING.
+                listener.onStatus(BotStatus.RUNNING, System.currentTimeMillis())
                 p.start()
                 return
             } catch (e: Exception) {

@@ -64,13 +64,15 @@ fun LibraryTab(botId: String, packages: String, onPackagesChange: (String) -> Un
                 context, botId, command.drop(1),
                 onLine = { line -> scope.launch { workLog += line } },
                 onExit = { code ->
+                    // Cleared here, not on the screen's scope: leaving the tab mid-install must not
+                    // leave every pip and 取り込む button disabled.
+                    BotController.workBusy.value = false
                     scope.launch {
                         installResult = if (code == 0) {
                             WorkResult.Done("インストール完了：${names.joinToString(", ")}")
                         } else {
                             WorkResult.Failed("インストールに失敗しました")
                         }
-                        BotController.workBusy.value = false
                     }
                 },
             )

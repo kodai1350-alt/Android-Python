@@ -111,6 +111,28 @@ class BotRunnerTest {
         assertEquals(0, created.get())
     }
 
+    @Test fun aProcessThatCannotBeCreatedIsCrashedNotAnUncaughtError() {
+        // A bot with no main file throws from createProcess; that must end this bot, not the whole app.
+        val r = BotRunner(
+            prepare = {},
+            createProcess = { _, _ -> error("最初に実行するファイルが選ばれていません") },
+            listener = listener,
+        ).also { runner = it }
+        val uncaught = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> uncaught.set(e) }
+        try {
+            assertTrue(r.start())
+            awaitFinished()
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+        assertEquals(null, uncaught.get())
+        assertEquals(BotStatus.CRASHED, finishedStatus)
+        assertTrue(lines.any { it.isError && "最初に実行するファイル" in it.text }, lines.toString())
+        assertFalse(r.isActive)
+    }
+
     @Test fun canStartAgainAfterFinish() {
         val r = runner(shell("exit 0"))
         r.start()
