@@ -28,9 +28,9 @@ import zipfile
 from pathlib import Path
 
 REPO = "https://packages.termux.dev/apt/termux-main"
-NODE_VERSION = "24.22.2"
+NODE_VERSION = "24.22.3"
 PINNED = [
-    ("pool/main/n/nodejs-lts/nodejs-lts_24.22.2-1_aarch64.deb", "837bbc7e422ef44583d590b7735c8736916183a185fc6f8c547c42b44cabfd01"),
+    ("pool/main/n/nodejs-lts/nodejs-lts_24.22.3_aarch64.deb", "80edcc73db025db0baa09be27e3d65a16e6f2a72ab925f1873a1b808ab857c28"),
     ("pool/main/c/c-ares/c-ares_1.34.9_aarch64.deb", "623d84855e176f3f2a415d24c0e1d2f529356f4b5439bb3313e6d7ff0da4585c"),
     ("pool/main/libc/libc++/libc++_30_aarch64.deb", "53d0b84a7ba7459024257cb94d5b136fe13ef858567f65a8064b35950799f2ca"),
     ("pool/main/libi/libicu/libicu_79.1_aarch64.deb", "83c980a010e957738e3567127801d66a1b9bd7e404a4fda98788048ee57d606c"),
