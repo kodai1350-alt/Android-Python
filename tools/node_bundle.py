@@ -18,6 +18,7 @@ RUNPATH stays but is unused: the app puts the native library folder on LD_LIBRAR
 Standard library only.
 """
 import hashlib
+import os
 import io
 import struct
 import sys
@@ -209,4 +210,10 @@ def main(out: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    try:
+        main(Path(sys.argv[1]))
+    except BaseException as e:
+        # On GitHub Actions, say why as an annotation: job logs need a sign-in, annotations don't.
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::error title=node_bundle::{type(e).__name__}: {e}".replace("\n", " "), flush=True)
+        raise
