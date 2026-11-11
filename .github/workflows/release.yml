@@ -24,6 +24,9 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+      # tools/node_bundle.py rewrites the Node.js libraries' names (SPIKE).
+      - name: ELF tool for the Node.js bundle
+        run: pip install "lief>=0.16,<2"
       - name: Build signed release APK
         env:
           KEYSTORE_FILE: ${{ runner.temp }}/release.jks

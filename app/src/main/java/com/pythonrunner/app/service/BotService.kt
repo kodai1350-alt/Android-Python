@@ -41,7 +41,9 @@ class BotService : Service() {
                     val main = store.mainFile ?: error("最初に実行するファイルが選ばれていません")
                     ManagedProcess(
                         rt.command(File(store.codeDir, main).path),
-                        rt.environment(listOf(store.libsDir), store.envVars),
+                        // SPIKE: bots also find the bundled node on PATH.
+                        rt.environment(listOf(store.libsDir), store.envVars) +
+                            BotController.node(this).let { nd -> if (nd.isBundled()) nd.environment() else emptyMap() },
                         store.codeDir, onLine, onExit,
                     )
                 },

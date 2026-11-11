@@ -117,6 +117,28 @@ fun AppSettingsScreen(onBack: () -> Unit) {
             if (workLog.isNotEmpty()) LogView(workLog, context, height = 200.dp)
         }
 
+        Section("Node.js（試験）") {
+            val nodeLog = remember { mutableStateListOf<LogLine>() }
+            var nodeRunning by remember { mutableStateOf(false) }
+            Text("通話機能の試作です。アプリに入れた Node.js が、このスマホで動くかを順番に確かめます（1〜3分）。", fontSize = 12.sp, color = Color.DarkGray)
+            Button(enabled = !nodeRunning && !busy, onClick = {
+                nodeLog.clear()
+                nodeRunning = true
+                BotController.workBusy.value = true
+                BotController.runNodeCheck(
+                    context,
+                    onLine = { line -> ContextCompat.getMainExecutor(context).execute { nodeLog += line } },
+                    onExit = {
+                        ContextCompat.getMainExecutor(context).execute {
+                            nodeRunning = false
+                            BotController.workBusy.value = false
+                        }
+                    },
+                )
+            }) { Text(if (nodeRunning) "確かめています…" else "Node.js を試す") }
+            if (nodeLog.isNotEmpty()) LogView(nodeLog, context, height = 320.dp)
+        }
+
         Section("ファイルの共有") {
             if (hasStorage) {
                 Text("✓ ストレージへのアクセスを許可済み", color = Green, fontWeight = FontWeight.Bold)

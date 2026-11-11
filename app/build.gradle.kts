@@ -195,6 +195,18 @@ val buildStubWheels = tasks.register<Zip>("buildStubWheels") {
     archiveFileName.set("audioop_lts-0.2.2-py3-none-any.whl")
 }
 
+// ---------------------------------------------------------------------------
+// Node.js (SPIKE): Termux's arm64 build, renamed so the APK carries it as lib*.so (tools/node_bundle.py).
+// ---------------------------------------------------------------------------
+val nodeDir = layout.buildDirectory.dir("node")
+val bundleNode = tasks.register<Exec>("bundleNode") {
+    val script = rootProject.file("tools/node_bundle.py")
+    inputs.file(script)
+    outputs.dir(nodeDir)
+    executable = (findProperty("nodeBundlePython") as String?) ?: "python3"
+    args(script.path, nodeDir.get().asFile.path)
+}
+
 fun generateTask(
     variant: ApplicationVariant, directories: SourceDirectories,
     configure: GenerateTask.() -> Unit,
@@ -217,8 +229,9 @@ androidComponents.onVariants { variant ->
                 include("libpython$pyMinorVersion.so", "lib*_python.so")
             }
             from(buildPyLauncher)
+            from(bundleNode.map { nodeDir.get().dir("jniLibs/arm64-v8a") })
         }
-        dependsOn(extractPython)
+        dependsOn(extractPython, bundleNode)
     }
     generateTask(variant, variant.sources.assets!!) {
         into("python") {
@@ -226,6 +239,7 @@ androidComponents.onVariants { variant ->
             from(downloadCacert)
             into("wheels") { from(buildStubWheels) }
         }
-        dependsOn(extractPython)
+        from(bundleNode.map { nodeDir.get().dir("assets") })
+        dependsOn(extractPython, bundleNode)
     }
 }

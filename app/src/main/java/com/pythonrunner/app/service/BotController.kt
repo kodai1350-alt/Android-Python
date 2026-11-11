@@ -30,6 +30,7 @@ import com.pythonrunner.app.files.SyncChanges
 import com.pythonrunner.app.process.LogBuffer
 import com.pythonrunner.app.process.LogLine
 import com.pythonrunner.app.process.ManagedProcess
+import com.pythonrunner.app.python.NodeRuntime
 import com.pythonrunner.app.python.PythonRuntime
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -321,6 +322,93 @@ object BotController {
                 openAsset = app.assets::open,
             )
         }.also { runtime = it }
+    }
+
+    @Volatile private var node: NodeRuntime? = null
+
+    /** The bundled Node.js (SPIKE). */
+    fun node(context: Context): NodeRuntime = node ?: synchronized(this) {
+        node ?: context.applicationContext.let { app ->
+            NodeRuntime(
+                baseDir = app.filesDir,
+                nativeLibDir = File(app.applicationInfo.nativeLibraryDir),
+                tmpDir = app.cacheDir,
+                version = "node-${BuildConfig.VERSION_CODE}",
+                certFile = File(runtime(app).home, "cacert.pem"),
+                openAsset = app.assets::open,
+            )
+        }.also { node = it }
+    }
+
+    /**
+     * SPIKE: checks, step by step, that the bundled Node.js runs here, reaches the internet, installs
+     * packages with npm, and loads Discord's voice encryption (DAVE). Every line goes to [onLine].
+     */
+    fun runNodeCheck(context: Context, onLine: (LogLine) -> Unit, onExit: (Int) -> Unit) {
+        val app = context.applicationContext
+        thread(name = "node-check") {
+            fun say(text: String, error: Boolean = false) = onLine(LogLine(System.currentTimeMillis(), text, error))
+            var failures = 0
+            try {
+                val rt = runtime(app)
+                rt.ensureInstalled()
+                val nd = node(app)
+                if (!nd.isBundled()) {
+                    say("Node.js がこのアプリに入っていません", true)
+                    onExit(1)
+                    return@thread
+                }
+                nd.ensureInstalled()
+                val work = File(app.filesDir, "node-check").apply { mkdirs() }
+                File(work, "package.json").writeText("{\"name\":\"node-check\",\"private\":true}")
+                val env = rt.environment(emptyList(), emptyMap()) + nd.environment()
+                fun step(title: String, command: List<String>, dir: File = work) {
+                    say("▶ $title")
+                    val done = java.util.concurrent.CountDownLatch(1)
+                    var code = -1
+                    ManagedProcess(command, env, dir, onLine) { code = it; done.countDown() }.start()
+                    done.await()
+                    if (code == 0) say("✓ $title") else { failures++; say("✗ $title（終了コード $code）", true) }
+                }
+                step("Node.js のバージョン", nd.command("--version"))
+                step(
+                    "Node.js の中身",
+                    nd.command("-p", "[process.platform, process.arch, 'openssl ' + process.versions.openssl, 'icu ' + process.versions.icu].join(' / ')"),
+                )
+                step(
+                    "インターネット（https）",
+                    nd.command(
+                        "-e",
+                        "fetch('https://discord.com/api/v10/gateway').then(r => r.json())" +
+                            ".then(j => console.log('https OK', j.url)).catch(e => { console.error('https NG', e); process.exit(1) })",
+                    ),
+                )
+                step(
+                    "npm install（@snazzah/davey @discordjs/voice）",
+                    nd.npm("install", "--ignore-scripts", "--no-audit", "--no-fund", "@snazzah/davey", "@discordjs/voice"),
+                )
+                step(
+                    "通話の暗号化（DAVE）の部品を読み込む",
+                    nd.command(
+                        "--input-type=module", "-e",
+                        "const d = await import('@snazzah/davey'); console.log('DAVE OK', 'protocol', d.DAVE_PROTOCOL_VERSION, Object.keys(d).length, 'exports')",
+                    ),
+                )
+                step(
+                    "@discordjs/voice の部品の一覧",
+                    nd.command("-e", "console.log(require('@discordjs/voice').generateDependencyReport())"),
+                )
+                step(
+                    "Python から node が見つかるか",
+                    rt.command("-c", "import shutil, subprocess; p = shutil.which('node'); print('which node:', p); print(subprocess.run([p, '-v'], capture_output=True, text=True).stdout.strip())"),
+                )
+                say(if (failures == 0) "すべて成功しました" else "失敗：$failures 個", failures > 0)
+                onExit(if (failures == 0) 0 else 1)
+            } catch (e: Exception) {
+                say("試験を続けられませんでした: ${e.message ?: e.javaClass.simpleName}", true)
+                onExit(-1)
+            }
+        }
     }
 
     // ---- Imports: into a bot, as a new bot, or adopting a found folder ----
