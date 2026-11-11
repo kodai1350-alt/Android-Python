@@ -205,6 +205,8 @@ val bundleNode = tasks.register<Exec>("bundleNode") {
     outputs.dir(nodeDir)
     executable = (findProperty("nodeBundlePython") as String?) ?: "python3"
     args(script.path, nodeDir.get().asFile.path)
+    // Start clean, so files a former version of the script wrote never end up in the APK.
+    doFirst { nodeDir.get().asFile.deleteRecursively() }
 }
 
 fun generateTask(

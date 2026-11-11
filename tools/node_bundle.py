@@ -4,40 +4,58 @@
 
 Writes:
   <out-dir>/jniLibs/arm64-v8a/libnodejs.so   the node executable
-  <out-dir>/jniLibs/arm64-v8a/libnode_*.so   the libraries it needs, renamed
+  <out-dir>/jniLibs/arm64-v8a/lib*.so         the libraries it needs, renamed
   <out-dir>/assets/node/npm.zip               npm (JavaScript only)
   <out-dir>/assets/node/VERSION               the Node.js version
 
-Android only extracts native files named lib*.so from the APK, so every library is renamed and the
-names they link to (DT_NEEDED, DT_SONAME) are rewritten to match; Termux's RUNPATH is removed (the app
-sets LD_LIBRARY_PATH to the native library folder instead). Needs: pip install lief.
+Every package is pinned by file name and SHA-256: the build stops if Termux serves anything else (it
+also stops once Termux removes an old version; then update PINNED from its Packages index).
+
+Android only extracts native files named lib*.so from the APK, so libraries named like libssl.so.3 are
+renamed. The names they are linked by (DT_NEEDED, DT_SONAME) are rewritten in place in each file's
+dynamic string table; every new name is no longer than the old one, so nothing moves. Termux's
+RUNPATH stays but is unused: the app puts the native library folder on LD_LIBRARY_PATH, searched first.
+Standard library only.
 """
 import hashlib
 import io
+import struct
 import sys
 import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
 
-import lief
-
 REPO = "https://packages.termux.dev/apt/termux-main"
-PACKAGES = ["nodejs-lts", "c-ares", "libc++", "libicu", "libsqlite", "openssl", "zlib", "npm"]
+NODE_VERSION = "24.22.2"
+PINNED = [
+    ("pool/main/n/nodejs-lts/nodejs-lts_24.22.2-1_aarch64.deb", "837bbc7e422ef44583d590b7735c8736916183a185fc6f8c547c42b44cabfd01"),
+    ("pool/main/c/c-ares/c-ares_1.34.9_aarch64.deb", "623d84855e176f3f2a415d24c0e1d2f529356f4b5439bb3313e6d7ff0da4585c"),
+    ("pool/main/libc/libc++/libc++_30_aarch64.deb", "53d0b84a7ba7459024257cb94d5b136fe13ef858567f65a8064b35950799f2ca"),
+    ("pool/main/libi/libicu/libicu_79.1_aarch64.deb", "83c980a010e957738e3567127801d66a1b9bd7e404a4fda98788048ee57d606c"),
+    ("pool/main/libs/libsqlite/libsqlite_3.54.1-1_aarch64.deb", "661fb995f7215845007b222a85266ae99d9443e87e0604f8677edfd738e6b81a"),
+    ("pool/main/o/openssl/openssl_1:3.6.5_aarch64.deb", "a2fb7856875e63ef6b90442752e05974813372c3ca86d2513a78ea43c67a0f8b"),
+    ("pool/main/z/zlib/zlib_1.4_aarch64.deb", "e3027565ae50bcd8ba5113c988b589754ae192c9cc3e6afbe3e4ed7c06b2598e"),
+    ("pool/main/n/npm/npm_12.2.2_all.deb", "edb4a1dc3a6967f1e65872c7cb7588bd3672152beab6ae633ba848931371e9e1"),
+]
 PREFIX = "data/data/com.termux/files/usr/"
 
-# Termux file (under usr/lib) → name in the APK, and the names other files link to it by.
+# Name node links to (= the file under usr/lib) → name in the APK. Each new name is at most as long as
+# the old one and does not clash with the app's other libraries (Python's are *_python.so).
 LIBS = {
-    "libz.so.1": "libnode_z.so",
-    "libcares.so": "libnode_cares.so",
-    "libsqlite3.so": "libnode_sqlite3.so",
-    "libcrypto.so.3": "libnode_crypto.so",
-    "libssl.so.3": "libnode_ssl.so",
-    "libicui18n.so.79": "libnode_icui18n.so",
-    "libicuuc.so.79": "libnode_icuuc.so",
-    "libicudata.so.79": "libnode_icudata.so",
-    "libc++_shared.so": "libnode_cxx.so",
+    "libz.so.1": "libnz.so",
+    "libcares.so": "libcares.so",
+    "libsqlite3.so": "libsqlite3.so",
+    "libcrypto.so.3": "libncrypto.so",
+    "libssl.so.3": "libnssl.so",
+    "libicui18n.so.79": "libnicui18n.so",
+    "libicuuc.so.79": "libnicuuc.so",
+    "libicudata.so.79": "libnicudata.so",
+    "libc++_shared.so": "libnc++.so",
 }
+
+DT_NULL, DT_NEEDED, DT_STRTAB, DT_STRSZ, DT_SONAME = 0, 1, 5, 10, 14
+PT_LOAD, PT_DYNAMIC = 1, 2
 
 
 def fetch(url: str) -> bytes:
@@ -45,22 +63,8 @@ def fetch(url: str) -> bytes:
         return r.read()
 
 
-def index() -> dict[str, dict[str, str]]:
-    text = fetch(f"{REPO}/dists/stable/main/binary-aarch64/Packages").decode("utf-8")
-    packages = {}
-    for block in text.split("\n\n"):
-        fields = {}
-        for line in block.splitlines():
-            if ":" in line and not line.startswith(" "):
-                key, value = line.split(":", 1)
-                fields[key] = value.strip()
-        if "Package" in fields:
-            packages[fields["Package"]] = fields
-    return packages
-
-
 def deb_files(data: bytes) -> dict[str, bytes]:
-    """The files of a .deb (an ar archive holding data.tar.*), by path."""
+    """The files of a .deb (an ar archive holding data.tar.*), by path; symlinks resolved."""
     assert data[:8] == b"!<arch>\n"
     i, files = 8, {}
     while i < len(data):
@@ -77,7 +81,6 @@ def deb_files(data: bytes) -> dict[str, bytes]:
                         files[path] = tar.extractfile(member).read()
                     elif member.issym():
                         links[path] = member.linkname
-                # Library names like libz.so.1 are symlinks: resolve them to the real file.
                 for path, target in links.items():
                     real = str(Path(path).parent / target).replace("\\", "/")
                     if real in files:
@@ -85,38 +88,115 @@ def deb_files(data: bytes) -> dict[str, bytes]:
     return files
 
 
-def patch(data: bytes, rename_self: str | None) -> bytes:
-    elf = lief.ELF.parse(list(data))
-    for entry in list(elf.dynamic_entries):
-        if entry.tag == lief.ELF.DynamicEntry.TAG.NEEDED and entry.name in LIBS:
-            entry.name = LIBS[entry.name]
-        elif entry.tag in (lief.ELF.DynamicEntry.TAG.RUNPATH, lief.ELF.DynamicEntry.TAG.RPATH):
-            elf.remove(entry)
-    if rename_self is not None:
-        soname = elf.get(lief.ELF.DynamicEntry.TAG.SONAME)
-        if soname is not None:
-            soname.name = rename_self
-    builder = lief.ELF.Builder(elf)
-    builder.build()
-    return bytes(builder.get_build())
+def _dynamic(elf: bytes) -> tuple[list[tuple[int, int]], int]:
+    """The dynamic entries (tag, value) of a 64-bit little-endian ELF and its string table's file offset."""
+    assert elf[:4] == b"\x7fELF" and elf[4] == 2 and elf[5] == 1, "not a 64-bit little-endian ELF"
+    phoff, = struct.unpack_from("<Q", elf, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", elf, 0x36)
+    loads, dynamic = [], None
+    for k in range(phnum):
+        p_type, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from("<IIQQQQ", elf, phoff + k * phentsize)
+        if p_type == PT_LOAD:
+            loads.append((p_vaddr, p_offset, p_filesz))
+        elif p_type == PT_DYNAMIC:
+            dynamic = (p_offset, p_filesz)
+    assert dynamic is not None, "no dynamic section"
+    entries = []
+    for off in range(dynamic[0], dynamic[0] + dynamic[1], 16):
+        tag, value = struct.unpack_from("<qQ", elf, off)
+        if tag == DT_NULL:
+            break
+        entries.append((tag, value))
+    strtab = next(v for t, v in entries if t == DT_STRTAB)
+    for vaddr, offset, size in loads:
+        if vaddr <= strtab < vaddr + size:
+            return entries, strtab - vaddr + offset
+    raise AssertionError("string table outside the loaded segments")
+
+
+def _string(elf: bytes, at: int) -> str:
+    return elf[at:elf.index(b"\0", at)].decode()
+
+
+def _string_refs(elf: bytes, entries: list[tuple[int, int]]) -> set[int]:
+    """Every offset into the dynamic string table that something in the file points at."""
+    refs = {v for t, v in entries if t in (DT_NEEDED, DT_SONAME, 15, 29)}  # + DT_RPATH, DT_RUNPATH
+    shoff, = struct.unpack_from("<Q", elf, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", elf, 0x3A)
+    for k in range(shnum):
+        _, sh_type, _, _, sh_offset, sh_size, _, sh_info, _, sh_entsize = struct.unpack_from(
+            "<IIQQQQIIQQ", elf, shoff + k * shentsize)
+        if sh_type == 11:  # SHT_DYNSYM: st_name of every symbol
+            refs.update(struct.unpack_from("<I", elf, sh_offset + i)[0] for i in range(0, sh_size, sh_entsize or 24))
+        elif sh_type == 0x6FFFFFFE:  # SHT_GNU_verneed: library and version names
+            at = sh_offset
+            for _ in range(sh_info):
+                _, cnt, file, aux, nxt = struct.unpack_from("<HHIII", elf, at)
+                refs.add(file)
+                a = at + aux
+                for _ in range(cnt):
+                    _, _, _, name, anext = struct.unpack_from("<IHHII", elf, a)
+                    refs.add(name)
+                    a += anext
+                at += nxt
+        elif sh_type == 0x6FFFFFFD:  # SHT_GNU_verdef: version names
+            at = sh_offset
+            for _ in range(sh_info):
+                _, _, _, cnt, _, aux, nxt = struct.unpack_from("<HHHHIII", elf, at)
+                a = at + aux
+                for _ in range(cnt):
+                    name, anext = struct.unpack_from("<II", elf, a)
+                    refs.add(name)
+                    a += anext
+                at += nxt
+    return refs
+
+
+def rename_links(elf: bytes) -> bytes:
+    """Rewrites the DT_NEEDED and DT_SONAME names found in LIBS, in place."""
+    out = bytearray(elf)
+    entries, strtab = _dynamic(elf)
+    refs = _string_refs(elf, entries)
+    for tag, value in entries:
+        if tag not in (DT_NEEDED, DT_SONAME):
+            continue
+        old = _string(elf, strtab + value)
+        new = LIBS.get(old)
+        if new is None or new == old:
+            continue
+        assert len(new) <= len(old), f"{new} is longer than {old}"
+        # A linker may store a name only as the tail of a longer string; such a name would change too.
+        shared = [r for r in refs if value < r <= value + len(old)]
+        assert not shared, f"{old}: part of it is used by another name"
+        at = strtab + value
+        out[at:at + len(old)] = new.encode() + b"\0" * (len(old) - len(new))
+    return bytes(out)
+
+
+def links(elf: bytes) -> list[str]:
+    entries, strtab = _dynamic(elf)
+    return [_string(elf, strtab + v) for t, v in entries if t in (DT_NEEDED, DT_SONAME)]
 
 
 def main(out: Path) -> None:
-    packages = index()
     files: dict[str, bytes] = {}
-    for name in PACKAGES:
-        info = packages[name]
-        data = fetch(f"{REPO}/{info['Filename']}")
-        if hashlib.sha256(data).hexdigest() != info["SHA256"]:
-            raise SystemExit(f"{name}: checksum mismatch")
-        print(f"{name} {info['Version']}")
+    for path, sha256 in PINNED:
+        data = fetch(f"{REPO}/{path}")
+        if hashlib.sha256(data).hexdigest() != sha256:
+            raise SystemExit(f"{path}: SHA-256 does not match the pinned value")
+        print(path)
         files.update(deb_files(data))
 
     jni = out / "jniLibs" / "arm64-v8a"
     jni.mkdir(parents=True, exist_ok=True)
-    (jni / "libnodejs.so").write_bytes(patch(files[PREFIX + "bin/node"], None))
+    outputs = {"libnodejs.so": rename_links(files[PREFIX + "bin/node"])}
     for termux_name, apk_name in LIBS.items():
-        (jni / apk_name).write_bytes(patch(files[PREFIX + "lib/" + termux_name], apk_name))
+        outputs[apk_name] = rename_links(files[PREFIX + "lib/" + termux_name])
+    for name, data in outputs.items():
+        # Every library must now be linked by a name the APK carries (or one Android provides).
+        for link in links(data):
+            assert link in outputs or link in ("libc.so", "libm.so", "libdl.so", "liblog.so"), f"{name} → {link}"
+        (jni / name).write_bytes(data)
 
     assets = out / "assets" / "node"
     assets.mkdir(parents=True, exist_ok=True)
@@ -125,7 +205,7 @@ def main(out: Path) -> None:
         for path, body in sorted(files.items()):
             if path.startswith(npm_root):
                 z.writestr("npm/" + path[len(npm_root):], body)
-    (assets / "VERSION").write_text(packages["nodejs-lts"]["Version"])
+    (assets / "VERSION").write_text(NODE_VERSION)
 
 
 if __name__ == "__main__":
