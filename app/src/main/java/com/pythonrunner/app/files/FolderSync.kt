@@ -265,6 +265,9 @@ class FolderSync(
 
         /** Never copied to or from the shared folder, where other apps can read. */
         fun isSecret(name: String): Boolean {
+            // .env itself is shared on purpose: the user keeps the bot's token with its folder, so a
+            // folder brought from a PC brings it along (the risk was explained and accepted).
+            if (name == ".env") return false
             val lower = name.lowercase()
             return lower == ".env" || lower.startsWith(".env.") ||
                 SECRET_EXTENSIONS.any { lower.endsWith(it) } ||

@@ -49,9 +49,9 @@ class SharedFoldersTest {
         assertFalse(File(root, "b/1.py").exists())
     }
 
-    @Test fun adoptableFilesSkipsSecretsAndCaches() {
-        listOf("src/bot.py", "persona.txt", ".env", "token.json", "__pycache__/x.pyc").forEach { write("紬/$it") }
-        assertEquals(listOf("persona.txt", "src/bot.py"), SharedFolders.adoptableFiles(File(root, "紬")))
+    @Test fun adoptableFilesBringEnvButSkipSecretsAndCaches() {
+        listOf("src/bot.py", "persona.txt", ".env", "token.json", "x.session", "__pycache__/x.pyc").forEach { write("紬/$it") }
+        assertEquals(listOf(".env", "persona.txt", "src/bot.py"), SharedFolders.adoptableFiles(File(root, "紬")))
         listOf("src/bot.py", "persona.txt", ".env", "token.json", "__pycache__/x.pyc")
             .forEach { assertTrue(File(root, "紬/$it").isFile, it) }
     }

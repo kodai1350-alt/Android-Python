@@ -27,9 +27,19 @@ class FolderSyncTest {
         sync.export()
         assertEquals("print(1)", read(shared, "main.py"))
         assertEquals("{}", read(shared, "data/a.json"))
-        assertFalse(File(shared, ".env").exists())
+        assertEquals("TOKEN=x", read(shared, ".env"))
         assertFalse(File(shared, "bot.session").exists())
         assertFalse(File(shared, "__pycache__").exists())
+    }
+
+    @Test fun envSyncsButOtherSecretsStayPrivate() {
+        write(private, ".env", "A=1")
+        write(private, ".env.local", "B=2")
+        write(private, "data/secure.key", "k")
+        sync.export()
+        assertEquals("A=1", read(shared, ".env"))
+        assertFalse(File(shared, ".env.local").exists())
+        assertFalse(File(shared, "data/secure.key").exists())
     }
 
     @Test fun nothingPendingRightAfterExport() {
@@ -113,11 +123,12 @@ class FolderSyncTest {
 
     @Test fun secretLookingNamesAreNeverShared() {
         listOf(
-            ".env", ".env.local", "bot.session", "server.pem", "private.key", "cert.p12", "cert.pfx",
+            ".env.local", "bot.session", "server.pem", "private.key", "cert.p12", "cert.pfx",
             "data.db", "cache.sqlite", "cache.sqlite3", "token.txt", "Discord_TOKEN.json",
             "secrets.json", "credentials.json", "password.txt",
         ).forEach { assertTrue(FolderSync.isSecret(it), it) }
-        listOf("main.py", "config.json", "data.json", "README.md", "requirements.txt")
+        // .env is shared on purpose: the user keeps the token with the bot's folder.
+        listOf("main.py", "config.json", "data.json", "README.md", "requirements.txt", ".env")
             .forEach { assertFalse(FolderSync.isSecret(it), it) }
     }
 
@@ -170,7 +181,7 @@ class FolderSyncTest {
 
     @Test fun secretLookingFilesInSharedAreIgnored() {
         sync.export()
-        write(shared, ".env", "TOKEN=evil")
+        write(shared, "bot.session", "evil")
         assertTrue(sync.pendingImports().isEmpty)
     }
 
@@ -186,10 +197,12 @@ class FolderSyncTest {
     }
 
     @Test fun forcedExportSkipsSecrets() {
+        write(private, "bot.session", "s")
         write(private, ".env", "TOKEN=x")
         write(private, "a.py", "a")
-        sync.exportForced(listOf(".env", "a.py", "../escape.py"))
-        assertFalse(File(shared, ".env").exists())
+        sync.exportForced(listOf("bot.session", ".env", "a.py", "../escape.py"))
+        assertFalse(File(shared, "bot.session").exists())
+        assertEquals("TOKEN=x", read(shared, ".env"))
         assertEquals("a", read(shared, "a.py"))
     }
 
