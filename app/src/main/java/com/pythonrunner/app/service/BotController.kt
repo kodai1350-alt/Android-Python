@@ -436,20 +436,37 @@ object BotController {
     }
 
     /**
-     * SPIKE: installs the parts a bot made of several programs needs (see [BotParts]): the libraries of
-     * every requirements.txt into the bot's own packages, with a .venv/bin/python beside it, then npm
-     * for every Node.js project. The bot must be stopped: npm ci replaces node_modules wholesale.
+     * 部品を入れる: the libraries of every requirements.txt into the bot's own packages, with a
+     * .venv/bin/python beside it, then npm for every Node.js project (see [BotParts]). Each finished part
+     * is recorded for the library tab. A running bot is stopped first (npm ci replaces node_modules
+     * wholesale) and started again at the end, whatever the outcome.
      */
     fun runBotParts(context: Context, botId: String, onLine: (LogLine) -> Unit, onExit: (Int) -> Unit) {
         val app = context.applicationContext
         thread(name = "bot-parts") {
             fun say(text: String, error: Boolean = false) = onLine(LogLine(System.currentTimeMillis(), text, error))
+            val wasRunning = isRunning(botId)
             try {
-                if (runState(botId).status.let { it == BotStatus.RUNNING || it == BotStatus.STARTING }) {
-                    say("先にBotを止めてください", true)
-                    onExit(1)
-                    return@thread
+                if (wasRunning) {
+                    say("Botを止めます")
+                    stop(app, botId)
+                    val until = System.currentTimeMillis() + 10_000
+                    while (isRunning(botId) && System.currentTimeMillis() < until) Thread.sleep(200)
                 }
+                runParts(app, botId, ::say, onExit)
+            } finally {
+                if (wasRunning) {
+                    say("Botを起動し直します")
+                    start(app, botId)
+                }
+            }
+        }
+    }
+
+    private fun runParts(app: Context, botId: String, say: (String, Boolean) -> Unit, onExit: (Int) -> Unit) {
+        val onLine: (LogLine) -> Unit = { say(it.text, it.isError) }
+        run {
+            try {
                 val rt = runtime(app)
                 rt.ensureInstalled()
                 val s = store(app, botId)
@@ -460,17 +477,20 @@ object BotController {
                 if (requirements.isEmpty() && projects.isEmpty()) {
                     say("requirements.txt も package.json も見つかりませんでした", true)
                     onExit(1)
-                    return@thread
+                    return
                 }
                 // Not the bot's secret values: pip and npm need none of them.
                 val env = rt.environment(listOf(s.libsDir), emptyMap()) + if (nd.isBundled()) nd.environment() else emptyMap()
+                fun record(key: String) {
+                    s.partsInstalled = s.partsInstalled + (key to System.currentTimeMillis())
+                }
                 fun step(title: String, command: List<String>, dir: File): Boolean {
-                    say("▶ $title")
+                    say("▶ $title", false)
                     val done = java.util.concurrent.CountDownLatch(1)
                     var exit = -1
                     ManagedProcess(command, env, dir, onLine) { exit = it; done.countDown() }.start()
                     done.await()
-                    if (exit == 0) say("✓ $title") else say("✗ $title（終了コード $exit）", true)
+                    if (exit == 0) say("✓ $title", false) else say("✗ $title（終了コード $exit）", true)
                     return exit == 0
                 }
                 fun where(f: File) = f.relativeTo(code).invariantSeparatorsPath.ifEmpty { "（いちばん上）" }
@@ -479,33 +499,35 @@ object BotController {
                     !step("pip を準備する", PipCommands.bootstrap(rt), code)
                 ) {
                     onExit(1)
-                    return@thread
+                    return
                 }
                 for (req in requirements) {
                     val dir = req.parentFile!!
                     if (!step("Python のライブラリ（${where(req)}）", PipCommands.install(rt, listOf("-r", req.path), s.libsDir), dir)) {
                         onExit(1)
-                        return@thread
+                        return
                     }
                     BotParts.linkVenvPython(dir, rt.executable)
-                    say("✓ ${where(BotParts.venvPython(dir))} を用意しました")
+                    say("✓ ${where(BotParts.venvPython(dir))} を用意しました", false)
+                    record(req.relativeTo(code).invariantSeparatorsPath)
                 }
                 if (projects.isNotEmpty()) {
                     if (!nd.isBundled()) {
                         say("Node.js がこのアプリに入っていません", true)
                         onExit(1)
-                        return@thread
+                        return
                     }
                     nd.ensureInstalled()
                     for (project in projects) {
                         val args = BotParts.npmArgs(project)
                         if (!step("Node.js の部品（${where(project)}、npm ${args.first()}）", nd.npm(*args.toTypedArray()), project)) {
                             onExit(1)
-                            return@thread
+                            return
                         }
+                        record(project.relativeTo(code).invariantSeparatorsPath.ifEmpty { "." })
                     }
                 }
-                say("部品をすべて入れました。Botを起動できます")
+                say("部品をすべて入れました", false)
                 onExit(0)
             } catch (e: Exception) {
                 say("続けられませんでした: ${e.message ?: e.javaClass.simpleName}", true)

@@ -25,6 +25,7 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
     private val keyMain = "bot.$id.mainFile"
     private val keyEnv = "bot.$id.envVars"
     private val keyRunning = "bot.$id.wasRunning"
+    private val keyParts = "bot.$id.parts"
 
     var mainFile: String?
         get() = prefs.get(keyMain)
@@ -37,6 +38,11 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
     var wasRunning: Boolean
         get() = prefs.get(keyRunning) == "true"
         set(value) = prefs.put(keyRunning, value.toString())
+
+    /** When each part (a requirements.txt's path, a package folder's path) was last installed, in millis. */
+    var partsInstalled: Map<String, Long>
+        get() = decodeVars(prefs.get(keyParts).orEmpty()).mapNotNull { (k, v) -> v.toLongOrNull()?.let { k to it } }.toMap()
+        set(value) = prefs.put(keyParts, encodeVars(value.mapValues { it.value.toString() }))
 
     /**
      * Deletes a file or folder of the bot ([relativePath] inside [codeDir]; anything else is refused).
@@ -65,7 +71,8 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
 
     companion object {
         /** The settings keys of bot [id]: main file, secrets, was running. */
-        fun keys(id: String): List<String> = listOf("bot.$id.mainFile", "bot.$id.envVars", "bot.$id.wasRunning")
+        fun keys(id: String): List<String> =
+            listOf("bot.$id.mainFile", "bot.$id.envVars", "bot.$id.wasRunning", "bot.$id.parts")
     }
 }
 

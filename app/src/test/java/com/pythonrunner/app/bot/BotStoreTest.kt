@@ -81,8 +81,15 @@ class BotStoreTest {
         assertEquals("n.py", store("b").mainFile)
     }
 
-    @Test fun keysNameTheThreeSettings() =
-        assertEquals(listOf("bot.a.mainFile", "bot.a.envVars", "bot.a.wasRunning"), BotStore.keys("a"))
+    @Test fun keysNameEverySetting() =
+        assertEquals(listOf("bot.a.mainFile", "bot.a.envVars", "bot.a.wasRunning", "bot.a.parts"), BotStore.keys("a"))
+
+    @Test fun partsInstalledRoundTripsAndIsDeletedWithTheBot() {
+        store("a").partsInstalled = mapOf("bot/requirements.txt" to 1_700_000_000_000L, "player" to 5L)
+        assertEquals(mapOf("bot/requirements.txt" to 1_700_000_000_000L, "player" to 5L), store("a").partsInstalled)
+        store("a").deleteAll()
+        assertEquals(emptyMap(), store("a").partsInstalled)
+    }
 }
 
 class MapKeyValue : KeyValue {
