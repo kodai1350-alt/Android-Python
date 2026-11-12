@@ -91,15 +91,27 @@ private fun ImportCheckDialog(plan: ImportPlan, onConfirm: (removeExtras: Boolea
                 }
                 if (added > 0) Text("増えるもの：${added} 個", fontSize = 13.sp)
                 if (plan.extras.isNotEmpty()) {
-                    Text("新しいフォルダにないもの（${plan.extras.size} 個）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    plan.extras.forEach { Text("・$it", fontSize = 13.sp) }
-                    listOf(false to "残す", true to "消す").forEach { (value, label) ->
+                    var all by remember(plan) { mutableStateOf(false) }
+                    Text("今のBotにあって、新しいフォルダにないファイル（${plan.extras.size} 個）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text("スマホで登録した音や、Botが作ったデータなどです。", fontSize = 12.sp, color = Color.DarkGray)
+                    (if (all) plan.extras else plan.extras.take(5)).forEach { Text("・$it", fontSize = 13.sp) }
+                    if (!all && plan.extras.size > 5) {
+                        TextButton(onClick = { all = true }) { Text("…ほか ${plan.extras.size - 5} 個を見る", fontSize = 13.sp) }
+                    }
+                    Text("このファイルをどうしますか？", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    listOf(
+                        Triple(false, "残す（おすすめ）", "新しいファイルを入れて、このファイルもそのまま使います。"),
+                        Triple(true, "削除する", "新しいフォルダと同じ中身にします。このファイルは消えて、元に戻せません。"),
+                    ).forEach { (value, label, note) ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.selectable(selected = removeExtras == value, onClick = { removeExtras = value }),
+                            modifier = Modifier.fillMaxWidth().selectable(selected = removeExtras == value, onClick = { removeExtras = value }),
                         ) {
                             RadioButton(selected = removeExtras == value, onClick = { removeExtras = value })
-                            Text(label, fontSize = 14.sp)
+                            Column {
+                                Text(label, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = if (value) Color(0xFFC92A2A) else Color.Unspecified)
+                                Text(note, fontSize = 12.sp, color = Color.DarkGray)
+                            }
                         }
                     }
                 }
@@ -109,7 +121,11 @@ private fun ImportCheckDialog(plan: ImportPlan, onConfirm: (removeExtras: Boolea
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { onConfirm(removeExtras) }) { Text("取り込む") } },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(removeExtras) }) {
+                if (removeExtras) Text("取り込んで ${plan.extras.size} 個を削除", color = Color(0xFFC92A2A)) else Text("取り込む")
+            }
+        },
         dismissButton = { TextButton(onClick = onCancel) { Text("やめる") } },
     )
 }
