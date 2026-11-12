@@ -71,11 +71,23 @@ class FileTreeTest {
     @Test fun kindsInWords() {
         assertEquals("フォルダ", FileTree.kind("cogs", isDirectory = true))
         assertEquals("Python", FileTree.kind("main.py", isDirectory = false))
-        assertEquals("秘密の値", FileTree.kind(".env", isDirectory = false))
+        assertEquals("トークンなど", FileTree.kind(".env", isDirectory = false))
         assertEquals("ライブラリ一覧", FileTree.kind("requirements.txt", isDirectory = false))
         assertEquals("設定", FileTree.kind("config.json", isDirectory = false))
         assertEquals("テキスト", FileTree.kind("README.md", isDirectory = false))
         assertEquals("画像", FileTree.kind("icon.PNG", isDirectory = false))
         assertEquals("ファイル", FileTree.kind("data.bin", isDirectory = false))
+    }
+
+    @Test fun fileCountCountsNestedFiles() {
+        file("src/a")
+        file("src/b/c")
+        assertEquals(2, FileTree.fileCount(File(root, "src")))
+    }
+
+    @Test fun installedPartsAreRecognised() {
+        assertEquals(true, FileTree.isInstalledPart("node_modules"))
+        assertEquals(true, FileTree.isInstalledPart(".venv"))
+        assertEquals(false, FileTree.isInstalledPart("venv"))
     }
 }

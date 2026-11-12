@@ -63,8 +63,8 @@ internal val Orange = Color(0xFFF08C00)
 internal const val SHARED_CHECK_MILLIS = 4_000L
 
 internal const val SHARED_WARNING =
-    "⚠ 共有フォルダは、ストレージの許可を持つ他のアプリからも読めます。トークンは .py や config.json などに書かず、" +
-        "設定タブの「秘密の値」（アプリ専用）に入れてください。.env・鍵・データベース、名前に token や secret を含むファイルはコピーしません。"
+    "⚠ 共有フォルダは、ストレージの許可を持つ他のアプリからも読めます。トークンを書いた .env も共有フォルダに置かれます。" +
+        "漏れたと思ったら、Discord の開発者ページでトークンを作り直してください。鍵・データベース、名前に token や secret を含むファイルはコピーしません。"
 
 @Composable
 internal fun rememberUiPrefs(): SharedPreferences {

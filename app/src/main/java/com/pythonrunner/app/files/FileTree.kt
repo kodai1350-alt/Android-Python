@@ -54,7 +54,8 @@ object FileTree {
         val ext = lower.substringAfterLast('.', "")
         return when {
             ext == "py" -> "Python"
-            lower == ".env" || lower.startsWith(".env.") -> "秘密の値"
+            lower == ".env" -> "トークンなど"
+            lower.startsWith(".env.") -> "秘密の値"
             lower == "requirements.txt" -> "ライブラリ一覧"
             ext in CONFIG -> "設定"
             ext in TEXT -> "テキスト"
@@ -62,6 +63,12 @@ object FileTree {
             else -> "ファイル"
         }
     }
+
+    /** Files at any depth under [dir] (what deleting the folder would remove). */
+    fun fileCount(dir: File): Int = dir.walkTopDown().count { it.isFile }
+
+    /** Folders the app fills itself (npm, the .venv link): shown, never deleted by hand. */
+    fun isInstalledPart(name: String): Boolean = name == "node_modules" || name == ".venv"
 
     private fun visibleChildren(dir: File): List<File> =
         dir.listFiles()?.filter { it.name != "__pycache__" }.orEmpty()
