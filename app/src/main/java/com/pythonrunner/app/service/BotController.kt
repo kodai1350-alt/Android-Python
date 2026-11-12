@@ -135,13 +135,18 @@ object BotController {
 
     fun name(context: Context, id: String): String? = registry(context).get(id)?.name
 
-    /** The values of the bot's .env, for its environment; [onBadLine] gets each line that could not be read. */
-    fun botEnv(context: Context, id: String, onBadLine: (Int) -> Unit): Map<String, String> {
+    /**
+     * The values of the bot's .env, for its environment. [onNote] gets a line for the log for each line
+     * that could not be read and each name left out (never a value).
+     */
+    fun botEnv(context: Context, id: String, onNote: (String) -> Unit): Map<String, String> {
         val file = File(store(context, id).codeDir, DotEnv.FILE)
         if (!file.isFile) return emptyMap()
         val parsed = DotEnv.parse(file.readText())
-        parsed.badLines.forEach(onBadLine)
-        return parsed.values
+        parsed.badLines.forEach { onNote(".env の ${it} 行目を読めませんでした") }
+        val (kept, dropped) = DotEnv.forProcess(parsed.values)
+        if (dropped.isNotEmpty()) onNote(".env の ${dropped.joinToString(", ")} は、安全のため使いません")
+        return kept
     }
 
     // ---- Shared folders ----

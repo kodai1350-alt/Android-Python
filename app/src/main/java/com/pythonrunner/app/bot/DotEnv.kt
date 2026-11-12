@@ -24,6 +24,24 @@ object DotEnv {
         return Parsed(values, bad)
     }
 
+    /**
+     * The values a bot's process may get, and the names left out (sorted). Names that change how programs
+     * are found or loaded are never taken from .env: a .env planted in the shared folder must not be able
+     * to load foreign code into the bot. The app sets its own values for most of them anyway.
+     */
+    fun forProcess(values: Map<String, String>): Pair<Map<String, String>, List<String>> {
+        val (dropped, kept) = values.entries.partition { (name, _) ->
+            val upper = name.uppercase()
+            upper.startsWith("LD_") || upper.startsWith("DYLD_") || upper in BLOCKED
+        }
+        return kept.associate { it.key to it.value } to dropped.map { it.key }.sorted()
+    }
+
+    private val BLOCKED = setOf(
+        "PATH", "HOME", "TMPDIR", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE", "PYTHONUSERBASE",
+        "PYTHONPLATLIBDIR", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    )
+
     /** The names in [text], in file order, each once. */
     fun names(text: String): List<String> {
         val names = LinkedHashSet<String>()

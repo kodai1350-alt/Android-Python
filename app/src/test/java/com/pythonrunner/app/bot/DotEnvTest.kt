@@ -36,4 +36,19 @@ class DotEnvTest {
     }
 
     @Test fun namesListsKeysInOrder() = assertEquals(listOf("B", "A"), DotEnv.names("B=1\nA=2\n# x\n"))
+
+    @Test fun namesThatChangeHowProgramsLoadAreDropped() {
+        val (kept, dropped) = DotEnv.forProcess(
+            mapOf(
+                "DISCORD_TOKEN" to "t", "LD_PRELOAD" to "/sdcard/x.so", "ld_library_path" to "/x",
+                "NODE_OPTIONS" to "--require /sdcard/x.js", "PYTHONSTARTUP" to "/sdcard/x.py",
+                "PYTHONPATH" to "/x", "PYTHONHOME" to "/x", "PATH" to "/sdcard", "PYTHONIOENCODING" to "utf-8",
+            ),
+        )
+        assertEquals(mapOf("DISCORD_TOKEN" to "t", "PYTHONIOENCODING" to "utf-8"), kept)
+        assertEquals(
+            listOf("LD_PRELOAD", "NODE_OPTIONS", "PATH", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "ld_library_path"),
+            dropped,
+        )
+    }
 }
