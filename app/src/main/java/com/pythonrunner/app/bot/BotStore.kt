@@ -27,6 +27,7 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
     private val keyEnv = "bot.$id.envVars"
     private val keyRunning = "bot.$id.wasRunning"
     private val keyParts = "bot.$id.parts"
+    private val keyEnvMigrated = "bot.$id.envMigrated"
 
     var mainFile: String?
         get() = prefs.get(keyMain)
@@ -39,6 +40,11 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
     var wasRunning: Boolean
         get() = prefs.get(keyRunning) == "true"
         set(value) = prefs.put(keyRunning, value.toString())
+
+    /** True once the old secret values were moved into .env (done once, never again). */
+    var envMigrated: Boolean
+        get() = prefs.get(keyEnvMigrated) == "true"
+        set(value) = prefs.put(keyEnvMigrated, if (value) "true" else null)
 
     /** When each part (a requirements.txt's path, a package folder's path) was last installed, in millis. */
     var partsInstalled: Map<String, Long>
@@ -81,7 +87,7 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
     companion object {
         /** The settings keys of bot [id]: main file, secrets, was running. */
         fun keys(id: String): List<String> =
-            listOf("bot.$id.mainFile", "bot.$id.envVars", "bot.$id.wasRunning", "bot.$id.parts")
+            listOf("bot.$id.mainFile", "bot.$id.envVars", "bot.$id.wasRunning", "bot.$id.parts", "bot.$id.envMigrated")
     }
 }
 

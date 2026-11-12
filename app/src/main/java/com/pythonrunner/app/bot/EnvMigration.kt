@@ -9,8 +9,12 @@ import java.io.IOException
  * same name the bot's own .env wins over the shared one, and both over the old secret values.
  */
 object EnvMigration {
-    /** True when the bot's .env changed (the caller then copies it to the shared folder). */
+    /**
+     * True when the bot's .env changed (the caller then copies it to the shared folder). Runs once per
+     * bot: afterwards a .env edited in the shared folder waits for 反映する like any other file.
+     */
     fun migrate(store: BotStore, sharedDir: File?): Boolean {
+        if (store.envMigrated) return false
         val file = File(store.codeDir, DotEnv.FILE)
         val shared = sharedDir?.let { File(it, DotEnv.FILE) }?.takeIf { it.isFile }?.readText()
         val before = if (file.isFile) file.readText() else null
@@ -21,6 +25,7 @@ object EnvMigration {
         if (changed) write(file, text)
         // Only once the values are safely in the file.
         if (store.envVars.isNotEmpty()) store.envVars = emptyMap()
+        store.envMigrated = true
         return changed
     }
 

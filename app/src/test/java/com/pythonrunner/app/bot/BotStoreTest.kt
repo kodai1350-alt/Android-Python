@@ -82,7 +82,7 @@ class BotStoreTest {
     }
 
     @Test fun keysNameEverySetting() =
-        assertEquals(listOf("bot.a.mainFile", "bot.a.envVars", "bot.a.wasRunning", "bot.a.parts"), BotStore.keys("a"))
+        assertEquals(listOf("bot.a.mainFile", "bot.a.envVars", "bot.a.wasRunning", "bot.a.parts", "bot.a.envMigrated"), BotStore.keys("a"))
 
     @Test fun partsInstalledRoundTripsAndIsDeletedWithTheBot() {
         store("a").partsInstalled = mapOf("bot/requirements.txt" to 1_700_000_000_000L, "player" to 5L)

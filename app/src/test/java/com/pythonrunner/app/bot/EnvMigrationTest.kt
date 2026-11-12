@@ -59,4 +59,14 @@ class EnvMigrationTest {
         assertFailsWith<Exception> { EnvMigration.migrate(store, null) }
         assertEquals(mapOf("T" to "1"), store.envVars)
     }
+
+    @Test fun runsOnlyOnceSoLaterSharedEditsWaitForTheUser() {
+        File(shared, ".env").writeText("TOKEN=old\n")
+        EnvMigration.migrate(store, shared)
+        // Later the token is rotated on a PC and a name added; the app restarts before 反映する.
+        File(shared, ".env").writeText("TOKEN=new\nGUILD_ID=1\n")
+        assertFalse(EnvMigration.migrate(store, shared))
+        assertEquals(mapOf("TOKEN" to "old"), privateEnv())
+        assertEquals("TOKEN=new\nGUILD_ID=1\n", File(shared, ".env").readText())
+    }
 }
