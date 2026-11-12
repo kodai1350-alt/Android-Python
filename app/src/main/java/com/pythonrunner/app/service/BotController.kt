@@ -37,6 +37,7 @@ import com.pythonrunner.app.python.NodeRuntime
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PythonRuntime
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -538,43 +539,86 @@ object BotController {
     private fun stagingFor(context: Context, t: Target?): File =
         if (t is Target.Existing) store(context, t.id).stagingDir else newStaging(context)
 
-    /** A picked file into bot [botId], or a new bot when null: a ZIP is extracted, anything else added as it is. */
-    fun importFile(context: Context, uri: Uri, botId: String?) =
+    /**
+     * A picked file into bot [botId] (inside its folder [into]), or a new bot when null: a ZIP is
+     * extracted, anything else added as it is. Files of the same name are replaced, others kept.
+     */
+    fun importFile(context: Context, uri: Uri, botId: String?, into: String = "") =
         startImport(context, uri, botId?.let { Target.Existing(it) } ?: Target.NewBot) { app, staging ->
-            val name = SafTree.displayName(app, uri) ?: "file"
-            val open = { app.contentResolver.openInputStream(uri) ?: error("ファイルを開けませんでした") }
-            pickedName = name
-            if (name.lowercase().endsWith(".zip")) {
-                requireSpace(SafTree.size(app, uri), app.cacheDir)
-                val zip = File(app.cacheDir, "import.zip")
-                try {
-                    open().use { input -> zip.outputStream().use { input.copyTo(it) } }
-                    requireSpace(BotImporter.zipSize(zip), app.filesDir)
-                    // Android 14+ refuses a whole ZIP over one ".." name; BotImporter drops such names itself.
-                    if (Build.VERSION.SDK_INT >= 34) dalvik.system.ZipPathValidator.clearCallback()
-                    BotImporter.stageZip(zip, staging) { _importState.value = ImportState.Working(it) }
-                } finally {
-                    zip.delete()
-                }
-            } else {
-                requireSpace(SafTree.size(app, uri), app.filesDir)
-                open().use { BotImporter.stageFile(name, it, staging) }
-                1
-            }
+            val prefix = if (botId != null) into else ""
+            importPrefix = prefix
+            stageFileFrom(app, uri, staging, prefix)
         }
 
-    /** A picked folder, with everything in it, into bot [botId], or a new bot when null. */
-    fun importFolder(context: Context, treeUri: Uri, botId: String?) =
+    /**
+     * A picked folder: into bot [botId] it goes under its own name inside [into] (the folder open on the
+     * files screen), checked against the folder of that name already there. For a new bot (null) its
+     * contents become the bot.
+     */
+    fun importFolder(context: Context, treeUri: Uri, botId: String?, into: String = "") =
         startImport(context, treeUri, botId?.let { Target.Existing(it) } ?: Target.NewBot) { app, staging ->
-            pickedName = runCatching {
-                SafTree.displayName(
-                    app, DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri)),
-                )
-            }.getOrNull() ?: "Bot"
-            val files = SafTree.list(app, treeUri).filter { !BotImporter.isSkipped(it.path) }
-            requireSpace(files.sumOf { it.size }, app.filesDir)
-            BotImporter.stageTree(files.map { it.path to it.open }, staging) { _importState.value = ImportState.Working(it) }
+            val name = folderName(app, treeUri)
+            pickedName = name ?: "Bot"
+            val prefix = if (botId == null) {
+                ""
+            } else {
+                val safe = name?.let { BotImporter.safePath(it) }?.takeIf { '/' !in it }
+                    ?: throw IOException("このフォルダの名前は使えません")
+                if (into.isEmpty()) safe else "$into/$safe"
+            }
+            importPrefix = prefix
+            if (botId != null) importScope = prefix
+            stageFolderFrom(app, treeUri, staging, prefix)
         }
+
+    /**
+     * 「Botをまるごと入れ替える」: the picked folder's (or ZIP's) contents become bot [botId]'s files.
+     * Its files that the new ones lack are listed in the check and kept unless the person removes them.
+     */
+    fun replaceBot(context: Context, uri: Uri, botId: String, zip: Boolean) =
+        startImport(context, uri, Target.Existing(botId)) { app, staging ->
+            importScope = ""
+            if (zip) stageFileFrom(app, uri, staging, "") else stageFolderFrom(app, uri, staging, "")
+        }
+
+    private fun folderName(app: Context, treeUri: Uri): String? = runCatching {
+        SafTree.displayName(app, DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri)))
+    }.getOrNull()
+
+    private fun stageFileFrom(app: Context, uri: Uri, staging: File, prefix: String): Int {
+        val name = SafTree.displayName(app, uri) ?: "file"
+        val open = { app.contentResolver.openInputStream(uri) ?: error("ファイルを開けませんでした") }
+        pickedName = name
+        return if (name.lowercase().endsWith(".zip")) {
+            requireSpace(SafTree.size(app, uri), app.cacheDir)
+            val zip = File(app.cacheDir, "import.zip")
+            try {
+                open().use { input -> zip.outputStream().use { input.copyTo(it) } }
+                requireSpace(BotImporter.zipSize(zip), app.filesDir)
+                // Android 14+ refuses a whole ZIP over one ".." name; BotImporter drops such names itself.
+                if (Build.VERSION.SDK_INT >= 34) dalvik.system.ZipPathValidator.clearCallback()
+                BotImporter.stageZip(zip, staging, prefix) { _importState.value = ImportState.Working(it) }
+            } finally {
+                zip.delete()
+            }
+        } else {
+            requireSpace(SafTree.size(app, uri), app.filesDir)
+            open().use { BotImporter.stageFile(name, it, staging, prefix) }
+            1
+        }
+    }
+
+    private fun stageFolderFrom(app: Context, treeUri: Uri, staging: File, prefix: String): Int {
+        val files = SafTree.list(app, treeUri).filter { !BotImporter.isSkipped(it.path) }
+        requireSpace(files.sumOf { it.size }, app.filesDir)
+        return BotImporter.stageTree(files.map { it.path to it.open }, staging, prefix) {
+            _importState.value = ImportState.Working(it)
+        }
+    }
+
+    /** Where the files being imported go inside the bot, and which part of it the check compares (null: none). */
+    @Volatile private var importPrefix: String = ""
+    @Volatile private var importScope: String? = null
 
     /** 「追加する」 on a folder found in PythonRunner: it becomes the new bot's shared folder as it is. */
     fun adoptFolder(context: Context, folderName: String) {
@@ -604,6 +648,8 @@ object BotController {
     private fun startImport(context: Context, picked: Uri, t: Target, stage: (Context, File) -> Int) {
         if (importBusy) return
         target = t
+        importPrefix = ""
+        importScope = null
         _importState.value = ImportState.Working(0)
         val app = context.applicationContext
         // The picker's grant ends with the activity; hold it so leaving the app does not stop the import.
@@ -627,11 +673,15 @@ object BotController {
                     _importState.value = ImportState.Failed("取り込めるファイルがありませんでした")
                     return@runImport
                 }
-                importRequirements = BotImporter.requirements(staging)
+                importRequirements = BotImporter.requirements(staging, importPrefix)
                 when (t) {
                     is Target.Existing -> {
-                        val plan = BotImporter.plan(staging, store(app, t.id).codeDir)
-                        if (plan.overwrites.isEmpty()) applyImport(app, t.id, plan) else _importState.value = ImportState.Confirm(plan)
+                        val plan = BotImporter.plan(staging, store(app, t.id).codeDir, importScope)
+                        if (plan.overwrites.isEmpty() && plan.extras.isEmpty()) {
+                            applyImport(app, t.id, plan, emptyList())
+                        } else {
+                            _importState.value = ImportState.Confirm(plan)
+                        }
                     }
                     else -> {
                         val names = registry(app).all().map { it.name }
@@ -655,21 +705,26 @@ object BotController {
         }
     }
 
-    /** 上書きして取り込む. */
-    fun confirmImport(context: Context) {
+    /** 取り込む in the check; [removeExtras] deletes the bot's files the new ones lack (「消す」). */
+    fun confirmImport(context: Context, removeExtras: Boolean) {
         val plan = (_importState.value as? ImportState.Confirm)?.plan ?: return
         val id = (target as? Target.Existing)?.id ?: return
         _importState.value = ImportState.Working(100)
         val app = context.applicationContext
-        scope.launch { runImport(app) { applyImport(app, id, plan) } }
+        scope.launch { runImport(app) { applyImport(app, id, plan, if (removeExtras) plan.extras else emptyList()) } }
     }
 
-    private fun applyImport(app: Context, id: String, plan: ImportPlan) {
+    private fun applyImport(app: Context, id: String, plan: ImportPlan, remove: List<String>) {
         val s = store(app, id)
         s.codeDir.mkdirs()
-        BotImporter.applyPlan(plan, s.stagingDir, s.codeDir, s.backupDir)
+        BotImporter.applyPlan(plan, s.stagingDir, s.codeDir, s.backupDir, remove = remove)
         // The shared copy follows at once, so the automatic check does not offer its old files back.
-        runCatching { sync(app, id)?.exportForced(plan.files) }
+        runCatching {
+            val sync = sync(app, id)
+            sync?.exportForced(plan.files)
+            // Removed files leave the shared folder too, unless they were edited there.
+            if (remove.isNotEmpty()) sync?.export()
+        }
         recheck(id)
         s.mainFile = BotImporter.pickMain(s.codeDir, s.mainFile)
         _importState.value = ImportState.Done(id, plan.files.size, importRequirements, isRunning(id), isNewBot = false)

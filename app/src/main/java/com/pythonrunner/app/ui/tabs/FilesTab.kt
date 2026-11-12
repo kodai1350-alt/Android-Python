@@ -90,8 +90,8 @@ fun FilesTab(
 
     ImportButton(
         enabled = !importBusy && !workBusy,
-        onPickFile = { onImportStarted(); imports.pickFile(botId) },
-        onPickFolder = { onImportStarted(); imports.pickFolder(botId) },
+        onPickFile = { onImportStarted(); imports.pickFile(botId, "") },
+        onPickFolder = { onImportStarted(); imports.pickFolder(botId, "") },
     )
     if (importBusy && BotController.importingBotId() != botId) Text("ほかのBotの取り込み中です", fontSize = 12.sp, color = Gray)
     importNote?.let { Text(it, color = Green, fontSize = 13.sp) }

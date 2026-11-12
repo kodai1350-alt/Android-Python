@@ -44,7 +44,15 @@ import com.pythonrunner.app.service.BotRunState
 import com.pythonrunner.app.service.ImportState
 
 /** How a new bot comes in: a file or a folder picked with Android's pickers, for bot id or a new bot (null). */
-class ImportActions(val pickFile: (String?) -> Unit, val pickFolder: (String?) -> Unit)
+/**
+ * The file pickers. [pickFile] and [pickFolder] import into bot botId (inside its folder into; a new bot
+ * when botId is null); [replaceBot] makes a picked folder or ZIP the whole bot.
+ */
+class ImportActions(
+    val pickFile: (botId: String?, into: String) -> Unit,
+    val pickFolder: (botId: String?, into: String) -> Unit,
+    val replaceBot: (botId: String, zip: Boolean) -> Unit,
+)
 
 /** Every bot at a glance: how many run, which stopped with an error, and where their files are. */
 @Composable
@@ -112,8 +120,8 @@ fun HomeScreen(imports: ImportActions, onOpen: (String) -> Unit, onSettings: () 
 
         AddBotButton(
             busy = importBusy,
-            onPickFile = { add { imports.pickFile(null) } },
-            onPickFolder = { add { imports.pickFolder(null) } },
+            onPickFile = { add { imports.pickFile(null, "") } },
+            onPickFolder = { add { imports.pickFolder(null, "") } },
         )
 
         unlisted.forEach { folder ->

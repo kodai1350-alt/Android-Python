@@ -23,6 +23,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontWeight
+import com.pythonrunner.app.files.ImportPlan
 import com.pythonrunner.app.service.ImportState
 
 /** The one way in: 📥 取り込む, then a file (.py, ZIP, anything) or a whole folder. */
@@ -45,7 +52,7 @@ fun ImportButton(enabled: Boolean, onPickFile: () -> Unit, onPickFolder: () -> U
 @Composable
 fun ImportStateView(
     state: ImportState,
-    onConfirm: () -> Unit,
+    onConfirm: (removeExtras: Boolean) -> Unit,
     onCancel: () -> Unit,
     onClose: () -> Unit,
     onName: (String) -> Unit = {},
@@ -55,19 +62,7 @@ fun ImportStateView(
             Text("取り込み中 ${state.percent}%", fontSize = 13.sp)
             LinearProgressIndicator(progress = { state.percent / 100f }, modifier = Modifier.fillMaxWidth())
         }
-        is ImportState.Confirm -> AlertDialog(
-            onDismissRequest = onCancel,
-            title = { Text("上書きされるファイルがあります") },
-            text = {
-                Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
-                    Text("次のファイルは、今あるものが新しい中身に置き換わります。", fontSize = 13.sp)
-                    state.plan.overwrites.forEach { Text("・$it", fontSize = 13.sp) }
-                    Text("ほかのファイル（Botが作ったデータなど）はそのまま残ります。", fontSize = 12.sp, color = Color.DarkGray)
-                }
-            },
-            confirmButton = { TextButton(onClick = onConfirm) { Text("上書きして取り込む") } },
-            dismissButton = { TextButton(onClick = onCancel) { Text("やめる") } },
-        )
+        is ImportState.Confirm -> ImportCheckDialog(state.plan, onConfirm, onCancel)
         is ImportState.Failed -> Column {
             Text(state.message, color = Color(0xFFE03131), fontSize = 13.sp)
             TextButton(onClick = onClose) { Text("閉じる") }
@@ -75,6 +70,48 @@ fun ImportStateView(
         is ImportState.ChooseName -> ChooseNameDialog(state, onConfirm = onName, onCancel = onCancel)
         ImportState.Idle, is ImportState.Done -> Unit
     }
+}
+
+/**
+ * What an import will do before it does it: what is replaced, how much is added, and the bot's files the
+ * new ones lack (kept unless 「消す」 is chosen).
+ */
+@Composable
+private fun ImportCheckDialog(plan: ImportPlan, onConfirm: (removeExtras: Boolean) -> Unit, onCancel: () -> Unit) {
+    var removeExtras by remember(plan) { mutableStateOf(false) }
+    val added = plan.files.size - plan.overwrites.size
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("取り込む前に確かめてください") },
+        text = {
+            Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (plan.overwrites.isNotEmpty()) {
+                    Text("置き換わるもの（${plan.overwrites.size} 個）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    plan.overwrites.forEach { Text("・$it", fontSize = 13.sp) }
+                }
+                if (added > 0) Text("増えるもの：${added} 個", fontSize = 13.sp)
+                if (plan.extras.isNotEmpty()) {
+                    Text("新しいフォルダにないもの（${plan.extras.size} 個）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    plan.extras.forEach { Text("・$it", fontSize = 13.sp) }
+                    listOf(false to "残す", true to "消す").forEach { (value, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.selectable(selected = removeExtras == value, onClick = { removeExtras = value }),
+                        ) {
+                            RadioButton(selected = removeExtras == value, onClick = { removeExtras = value })
+                            Text(label, fontSize = 14.sp)
+                        }
+                    }
+                }
+                Text(
+                    "アプリが入れた部品（node_modules・.venv）と、アプリの中だけのファイル（secure.key など）は、いつも残ります。",
+                    fontSize = 12.sp, color = Color.DarkGray,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(removeExtras) }) { Text("取り込む") } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("やめる") } },
+    )
 }
 
 /** The new bot's name, prefilled from the picked file or folder; the folder in PythonRunner gets it too. */

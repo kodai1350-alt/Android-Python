@@ -62,18 +62,33 @@ fun AppNav() {
     }
     BackHandler(enabled = screen != Screen.Home) { go(Screen.Home) }
 
-    // The pickers: which bot the picked file goes into (null = a new bot).
+    // The pickers: which bot the picked file goes into (null = a new bot), into which of its folders,
+    // and whether it replaces the whole bot. Saved, as the picker may outlive the activity.
     var pickTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var pickInto by rememberSaveable { mutableStateOf("") }
+    var pickReplace by rememberSaveable { mutableStateOf(false) }
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) BotController.importFile(context, uri, pickTarget)
+        val target = pickTarget
+        if (uri == null) return@rememberLauncherForActivityResult
+        if (pickReplace && target != null) BotController.replaceBot(context, uri, target, zip = true)
+        else BotController.importFile(context, uri, target, pickInto)
     }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) BotController.importFolder(context, uri, pickTarget)
+        val target = pickTarget
+        if (uri == null) return@rememberLauncherForActivityResult
+        if (pickReplace && target != null) BotController.replaceBot(context, uri, target, zip = false)
+        else BotController.importFolder(context, uri, target, pickInto)
     }
     val imports = remember {
         ImportActions(
-            pickFile = { id -> pickTarget = id; pickFile.launch(arrayOf("*/*")) },
-            pickFolder = { id -> pickTarget = id; pickFolder.launch(null) },
+            pickFile = { id, into -> pickTarget = id; pickInto = into; pickReplace = false; pickFile.launch(arrayOf("*/*")) },
+            pickFolder = { id, into -> pickTarget = id; pickInto = into; pickReplace = false; pickFolder.launch(null) },
+            replaceBot = { id, zip ->
+                pickTarget = id
+                pickInto = ""
+                pickReplace = true
+                if (zip) pickFile.launch(arrayOf("application/zip", "application/x-zip-compressed")) else pickFolder.launch(null)
+            },
         )
     }
 
@@ -106,7 +121,7 @@ fun AppNav() {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             ImportStateView(
                 importState,
-                onConfirm = { BotController.confirmImport(context) },
+                onConfirm = { removeExtras -> BotController.confirmImport(context, removeExtras) },
                 onCancel = { BotController.cancelImport(context) },
                 onClose = { BotController.finishImport() },
                 onName = { BotController.confirmName(context, it) },
