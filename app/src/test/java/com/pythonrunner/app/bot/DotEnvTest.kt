@@ -51,4 +51,15 @@ class DotEnvTest {
             dropped,
         )
     }
+
+    @Test fun runtimeTlsAndProxySettingsAreDroppedButHarmlessPythonOnesKept() {
+        val names = listOf(
+            "PYTHONINSPECT", "PYTHONWARNINGS", "NODE_TLS_REJECT_UNAUTHORIZED", "OPENSSL_CONF", "BASH_ENV", "ENV",
+            "BROWSER", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "HTTPS_PROXY", "http_proxy", "ALL_PROXY",
+            "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "BOT_PREFIX",
+        )
+        val (kept, dropped) = DotEnv.forProcess(names.associateWith { "x" })
+        assertEquals(setOf("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "BOT_PREFIX"), kept.keys)
+        assertEquals(12, dropped.size)
+    }
 }

@@ -30,16 +30,20 @@ object DotEnv {
      * to load foreign code into the bot. The app sets its own values for most of them anyway.
      */
     fun forProcess(values: Map<String, String>): Pair<Map<String, String>, List<String>> {
-        val (dropped, kept) = values.entries.partition { (name, _) ->
-            val upper = name.uppercase()
-            upper.startsWith("LD_") || upper.startsWith("DYLD_") || upper in BLOCKED
-        }
+        val (dropped, kept) = values.entries.partition { (name, _) -> isBlocked(name.uppercase()) }
         return kept.associate { it.key to it.value } to dropped.map { it.key }.sorted()
     }
 
+    private fun isBlocked(upper: String): Boolean =
+        BLOCKED_PREFIXES.any { upper.startsWith(it) } && upper !in ALLOWED ||
+            upper.endsWith("_PROXY") || upper in BLOCKED
+
+    // Loaders, interpreters and TLS/proxy settings: each could run foreign code or let a token be read in transit.
+    private val BLOCKED_PREFIXES = listOf("LD_", "DYLD_", "PYTHON", "NODE_", "OPENSSL_")
+    private val ALLOWED = setOf("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE")
     private val BLOCKED = setOf(
-        "PATH", "HOME", "TMPDIR", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE", "PYTHONUSERBASE",
-        "PYTHONPLATLIBDIR", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "PATH", "HOME", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+        "BASH_ENV", "ENV", "BROWSER",
     )
 
     /** The names in [text], in file order, each once. */
