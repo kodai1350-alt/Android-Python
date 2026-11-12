@@ -29,6 +29,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.text.font.FontFamily
 import java.io.File
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pythonrunner.app.bot.DotEnv
@@ -113,6 +117,7 @@ fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: In
 private fun EnvSection(botId: String, filesVersion: Int) {
     val context = LocalContext.current
     val prefs = rememberUiPrefs()
+    val scope = rememberCoroutineScope()
     val file = remember(botId) { File(BotController.store(context, botId).codeDir, DotEnv.FILE) }
     var saved by remember(botId, filesVersion) { mutableStateOf(if (file.isFile) file.readText() else null) }
     var editing by remember(botId) { mutableStateOf<String?>(null) }
@@ -132,10 +137,17 @@ private fun EnvSection(botId: String, filesVersion: Int) {
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
-                        BotController.saveEnv(context, botId, text)
-                        saved = text
-                        editing = null
-                        justSaved = true
+                        scope.launch {
+                            val ok = withContext(Dispatchers.IO) { runCatching { BotController.saveEnv(context, botId, text) }.isSuccess }
+                            if (ok) {
+                                saved = text
+                                editing = null
+                                justSaved = true
+                            } else {
+                                // The edit stays in the box, so nothing typed is lost.
+                                Toast.makeText(context, ".env を保存できませんでした", Toast.LENGTH_LONG).show()
+                            }
+                        }
                     }) { Text("保存") }
                     OutlinedButton(onClick = { editing = null }) { Text("やめる") }
                 }

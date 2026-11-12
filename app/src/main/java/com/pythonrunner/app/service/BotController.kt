@@ -300,10 +300,22 @@ object BotController {
 
     fun isRunning(id: String): Boolean = runState(id).status.let { it == BotStatus.RUNNING || it == BotStatus.STARTING }
 
-    fun start(context: Context, id: String) = send(context, BotService.ACTION_START, id, foreground = true)
+    fun start(context: Context, id: String) {
+        if (refuseWhileInstalling(id)) return
+        send(context, BotService.ACTION_START, id, foreground = true)
+    }
 
     /** Stops the bot and starts it again, so files changed while it ran are used. */
-    fun restart(context: Context, id: String) = send(context, BotService.ACTION_RESTART, id, foreground = true)
+    fun restart(context: Context, id: String) {
+        if (refuseWhileInstalling(id)) return
+        send(context, BotService.ACTION_RESTART, id, foreground = true)
+    }
+
+    private fun refuseWhileInstalling(id: String): Boolean {
+        if (id !in installing) return false
+        appendLog(id, LogLine(System.currentTimeMillis(), "部品を入れている間は起動できません。終わってから起動してください", true))
+        return true
+    }
 
     fun stop(context: Context, id: String) = send(context, BotService.ACTION_STOP, id, foreground = false)
 
@@ -450,9 +462,11 @@ object BotController {
      */
     fun runBotParts(context: Context, botId: String, onLine: (LogLine) -> Unit, onExit: (Int) -> Unit) {
         val app = context.applicationContext
+        installing += botId
         thread(name = "bot-parts") {
             fun say(text: String, error: Boolean = false) = onLine(LogLine(System.currentTimeMillis(), text, error))
             val wasRunning = isRunning(botId)
+            var code = -1
             try {
                 if (wasRunning) {
                     say("Botを止めます")
@@ -460,15 +474,28 @@ object BotController {
                     val until = System.currentTimeMillis() + 10_000
                     while (isRunning(botId) && System.currentTimeMillis() < until) Thread.sleep(200)
                 }
-                runParts(app, botId, ::say, onExit)
+                // npm ci would replace node_modules under a bot that is still running.
+                if (isRunning(botId)) {
+                    say("Botが止まらなかったので、部品は入れていません", true)
+                    code = 1
+                } else {
+                    runParts(app, botId, ::say) { code = it }
+                }
             } finally {
+                installing -= botId
                 if (wasRunning) {
                     say("Botを起動し直します")
-                    start(app, botId)
+                    // From a background thread Android 12+ may refuse a foreground start: say so, never crash.
+                    runCatching { start(app, botId) }.onFailure { say("Botを起動できませんでした。「起動」を押してください", true) }
                 }
+                // Last, so delete and 取り込む stay disabled until the bot is back.
+                onExit(code)
             }
         }
     }
+
+    /** Bots whose parts are being installed: they are not started meanwhile. */
+    private val installing: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private fun runParts(app: Context, botId: String, say: (String, Boolean) -> Unit, onExit: (Int) -> Unit) {
         val onLine: (LogLine) -> Unit = { say(it.text, it.isError) }
@@ -745,6 +772,19 @@ object BotController {
 
     private fun applyImport(app: Context, id: String, plan: ImportPlan, remove: List<String>) {
         val s = store(app, id)
+        val wasRunning = isRunning(id)
+        // Removing files under a running bot could take its data away while it uses it: stop it first
+        // (the screen then offers to start it again, as after any import into a running bot).
+        if (remove.isNotEmpty() && wasRunning) {
+            stop(app, id)
+            val until = System.currentTimeMillis() + 10_000
+            while (isRunning(id) && System.currentTimeMillis() < until) Thread.sleep(200)
+            if (isRunning(id)) {
+                s.stagingDir.deleteRecursively()
+                _importState.value = ImportState.Failed("Botが止まらなかったので、取り込みませんでした")
+                return
+            }
+        }
         s.codeDir.mkdirs()
         BotImporter.applyPlan(plan, s.stagingDir, s.codeDir, s.backupDir, remove = remove)
         // The shared copy follows at once, so the automatic check does not offer its old files back.
@@ -756,7 +796,7 @@ object BotController {
         }
         recheck(id)
         s.mainFile = BotImporter.pickMain(s.codeDir, s.mainFile)
-        _importState.value = ImportState.Done(id, plan.files.size, importRequirements, isRunning(id), isNewBot = false)
+        _importState.value = ImportState.Done(id, plan.files.size, importRequirements, wasRunning, isNewBot = false)
     }
 
     /** 「追加する」 with the name typed for a new or adopted bot. */

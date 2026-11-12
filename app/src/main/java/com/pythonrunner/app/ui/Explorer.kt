@@ -27,6 +27,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -45,6 +46,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * The bot's files in one place, like a folder on a PC: an address bar with an up button, then name,
@@ -134,7 +137,10 @@ fun Explorer(
     }
 
     confirmDelete?.let { entry ->
-        val count = remember(entry) { if (entry.isDirectory) FileTree.fileCount(File(root, entry.relativePath)) else 0 }
+        // Counted off the main thread: a folder holding node_modules has tens of thousands of files.
+        val count by produceState<Int?>(null, entry) {
+            value = if (entry.isDirectory) withContext(Dispatchers.IO) { FileTree.fileCount(File(root, entry.relativePath)) } else 0
+        }
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = {
@@ -142,7 +148,7 @@ fun Explorer(
             },
             text = {
                 Text(
-                    if (entry.isDirectory) "中の $count 個のファイルも消えます。共有フォルダからも消えます。" else "共有フォルダからも消えます。",
+                    if (entry.isDirectory) "中の ${count ?: "…"} 個のファイルも消えます。共有フォルダからも消えます。" else "共有フォルダからも消えます。",
                 )
             },
             confirmButton = {
