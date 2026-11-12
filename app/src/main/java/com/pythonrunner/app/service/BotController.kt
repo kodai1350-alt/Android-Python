@@ -787,9 +787,15 @@ object BotController {
      * Deletes bot [id]: stops it, then removes its private files, packages and secrets, its shared folder
      * when [deleteFolder], and its place in the list.
      */
-    fun deleteBot(context: Context, id: String, deleteFolder: Boolean) {
+    /**
+     * Deletes bot [id] with its shared folder. Without storage access the folder cannot be removed:
+     * returns the message saying where it was left, else null.
+     */
+    fun deleteBot(context: Context, id: String): String? {
         val app = context.applicationContext
         val folder = sharedDir(app, id)
+        val access = hasSharedStorageAccess(app)
+        val left = if (!access && folder != null) "ドキュメント › PythonRunner › ${folder.name} は残りました（ストレージの許可がないため）" else null
         val sync = sync(app, id)
         val store = store(app, id)
         // Out of the list first: from here on no export, check, start or import can reach the bot.
@@ -802,7 +808,7 @@ object BotController {
             // What was synced goes before the files, so their vanishing never deletes shared copies.
             if (sync != null) sync.forget() else store.manifestFile.delete()
             store.deleteAll()
-            if (deleteFolder && folder != null && hasSharedStorageAccess(app)) runCatching { folder.deleteRecursively() }
+            if (folder != null && access) runCatching { folder.deleteRecursively() }
             declinedChanges.remove(id)
             fingerprints.remove(id)
             buffers.remove(id)
@@ -811,6 +817,7 @@ object BotController {
             app.getSystemService(NotificationManager::class.java).cancel(BotService.crashNotificationId(id))
             checkShared(app)
         }
+        return left
     }
 
     /** Frees the space of the AI model a test build downloaded (the AI is set aside for now). */

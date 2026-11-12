@@ -9,10 +9,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -71,29 +69,19 @@ fun SharedChangesDialog(
     )
 }
 
-/** 「このBotを削除」: keeping the shared folder is the default. */
+/** 「このBotを削除」: the bot goes with its shared folder. */
 @Composable
-fun DeleteBotDialog(name: String, onDelete: (deleteFolder: Boolean) -> Unit, onCancel: () -> Unit) {
-    var deleteFolder by remember { mutableStateOf(false) }
+fun DeleteBotDialog(name: String, onDelete: () -> Unit, onCancel: () -> Unit) {
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text("「$name」を削除しますか？") },
+        title = { Text("『$name』を削除しますか？") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(false to "一覧から外すだけ（フォルダは残す）", true to "フォルダも削除する").forEach { (value, label) ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.selectable(selected = deleteFolder == value, onClick = { deleteFolder = value }),
-                    ) {
-                        RadioButton(selected = deleteFolder == value, onClick = { deleteFolder = value })
-                        Text(label, fontSize = 14.sp)
-                    }
-                }
-                Text("動いていれば止めます。アプリの中のファイル・ライブラリ・設定と、秘密の値も消えます。", fontSize = 12.sp, color = Red)
-                if (deleteFolder) Text("${folderLabel(name)} も消えます。元に戻せません。", fontSize = 12.sp, color = Red)
-            }
+            Text(
+                "動いていれば止めます。ファイル・ライブラリ・設定と、共有フォルダ（${folderLabel(name)}）も消えます。元に戻せません。",
+                fontSize = 13.sp, color = Red,
+            )
         },
-        confirmButton = { TextButton(onClick = { onDelete(deleteFolder) }) { Text("削除する", color = Red) } },
+        confirmButton = { TextButton(onClick = onDelete) { Text("削除する", color = Red) } },
         dismissButton = { TextButton(onClick = onCancel) { Text("やめる") } },
     )
 }

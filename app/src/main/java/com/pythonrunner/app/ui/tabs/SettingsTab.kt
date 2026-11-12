@@ -1,5 +1,6 @@
 package com.pythonrunner.app.ui.tabs
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -93,16 +94,13 @@ fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: In
         if (confirm) {
             DeleteBotDialog(
                 name = name,
-                onDelete = { deleteFolder ->
+                onDelete = {
                     confirm = false
                     // The screen goes back to the list by itself once the bot is gone.
-                    BotController.deleteBot(context, botId, deleteFolder)
+                    BotController.deleteBot(context, botId)?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
                 },
                 onCancel = { confirm = false },
             )
-        }
-        Help("delete", prefs) {
-            Text("「一覧から外すだけ」なら、フォルダはファイルアプリやPCにそのまま残り、あとでホーム画面から追加し直せます。", fontSize = 12.sp, color = Color.DarkGray)
         }
     }
 }
