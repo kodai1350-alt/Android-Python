@@ -16,6 +16,8 @@ import com.pythonrunner.app.bot.BotNames
 import com.pythonrunner.app.bot.BotRegistry
 import com.pythonrunner.app.bot.BotStatus
 import com.pythonrunner.app.bot.BotStore
+import com.pythonrunner.app.bot.DotEnv
+import com.pythonrunner.app.bot.EnvMigration
 import com.pythonrunner.app.bot.KeyValue
 import com.pythonrunner.app.bot.NameCheck
 import com.pythonrunner.app.bot.SpikeMigration
@@ -113,6 +115,11 @@ object BotController {
         for (bot in registry(app).all()) {
             val s = store(app, bot.id)
             runCatching { BotImporter.recover(s.codeDir, s.backupDir, s.stagingDir) }
+            // The old 秘密の値 move into the bot's .env; a failure is retried at the next start.
+            runCatching {
+                val shared = if (hasSharedStorageAccess(app)) sharedDir(app, bot.id) else null
+                if (EnvMigration.migrate(s, shared)) sync(app, bot.id)?.exportForced(listOf(DotEnv.FILE))
+            }
         }
         newStaging(app).deleteRecursively()
         refreshBots(app)
@@ -127,6 +134,15 @@ object BotController {
     fun store(context: Context, id: String): BotStore = BotStore(id, botsRoot(context), prefs(context, "bots"))
 
     fun name(context: Context, id: String): String? = registry(context).get(id)?.name
+
+    /** The values of the bot's .env, for its environment; [onBadLine] gets each line that could not be read. */
+    fun botEnv(context: Context, id: String, onBadLine: (Int) -> Unit): Map<String, String> {
+        val file = File(store(context, id).codeDir, DotEnv.FILE)
+        if (!file.isFile) return emptyMap()
+        val parsed = DotEnv.parse(file.readText())
+        parsed.badLines.forEach(onBadLine)
+        return parsed.values
+    }
 
     // ---- Shared folders ----
 

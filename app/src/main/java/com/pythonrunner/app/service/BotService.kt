@@ -42,7 +42,12 @@ class BotService : Service() {
                     ManagedProcess(
                         rt.command(File(store.codeDir, main).path),
                         // SPIKE: bots also find the bundled node on PATH.
-                        rt.environment(listOf(store.libsDir), store.envVars) +
+                        rt.environment(
+                            listOf(store.libsDir),
+                            BotController.botEnv(this, id) { n ->
+                                BotController.appendLog(id, LogLine(System.currentTimeMillis(), ".env の ${n} 行目を読めませんでした", true))
+                            },
+                        ) +
                             BotController.node(this).let { nd -> if (nd.isBundled()) nd.environment() else emptyMap() },
                         store.codeDir, onLine, onExit,
                     )
