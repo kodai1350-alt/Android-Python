@@ -35,6 +35,8 @@ object BotNames {
     fun suggest(pickedName: String, takenNames: Collection<String>): String {
         val base = pickedName
             .replace(Regex("\\.(zip|py)$", RegexOption.IGNORE_CASE), "")
+            // 「入退室音-Android.zip」 is the bot 入退室音, built for the phone by the bot rules' ZIP script.
+            .replace(Regex("(?<=.)[-_ ]android$", RegexOption.IGNORE_CASE), "")
             .map { if (isUnsafe(it)) '_' else it }.joinToString("")
             .trimStart('.').trim()
             .take(MAX_LENGTH).trim()

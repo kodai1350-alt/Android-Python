@@ -30,6 +30,14 @@ class BotNamesTest {
         assertEquals("a_b", BotNames.suggest("a:b", emptyList()))
     }
 
+    @Test fun suggestDropsTheAndroidSuffixOfABuiltZip() {
+        assertEquals("入退室音", BotNames.suggest("入退室音-Android.zip", emptyList()))
+        assertEquals("music", BotNames.suggest("music_android.ZIP", emptyList()))
+        // Only as a suffix after a separator: a name that is just "android" stays.
+        assertEquals("android", BotNames.suggest("android.zip", emptyList()))
+        assertEquals("myandroid", BotNames.suggest("myandroid.zip", emptyList()))
+    }
+
     @Test fun suggestAvoidsTakenNames() = assertEquals("紬 3", BotNames.suggest("紬", listOf("紬", "紬 2")))
 
     @Test fun suggestFallsBackWhenNothingIsLeft() = assertEquals("Bot", BotNames.suggest(".zip", emptyList()))
