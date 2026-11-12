@@ -11,7 +11,13 @@ import java.util.zip.ZipFile
  * What an import would do: every file it brings in, the existing files whose content it would
  * replace (asked about first), and its size. Paths are relative with "/" separators, sorted.
  */
-data class ImportPlan(val files: List<String>, val overwrites: List<String>, val bytes: Long)
+data class ImportPlan(
+    val files: List<String>,
+    val overwrites: List<String>,
+    val bytes: Long,
+    /** Files already in the bot (under the import's scope) that the import does not bring: kept unless removed. */
+    val extras: List<String> = emptyList(),
+)
 
 /**
  * Brings files into the bot folder in three steps: everything is first placed in a staging folder,
@@ -44,8 +50,8 @@ object BotImporter {
      * folder and skipped folders are dropped; a single top folder (as in GitHub's "Download ZIP") is
      * removed. [onProgress] gets 0 to 100.
      */
-    fun stageZip(zip: File, staging: File, onProgress: (Int) -> Unit = {}): Int {
-        staging.mkdirs()
+    fun stageZip(zip: File, staging: File, prefix: String = "", onProgress: (Int) -> Unit = {}): Int {
+        val base = under(staging, prefix).apply { mkdirs() }
         var count = 0
         openZip(zip).use { file ->
             val entries = file.entries().asSequence().filter { !it.isDirectory }.toList()
@@ -54,39 +60,44 @@ object BotImporter {
             for (entry in entries) {
                 val path = safePath(entry.name)
                 if (path != null && !isSkipped(path)) {
-                    write(staging, path) { file.getInputStream(entry) }
+                    write(base, path) { file.getInputStream(entry) }
                     count++
                 }
                 done += entry.size.coerceAtLeast(0)
                 onProgress((done * 100 / total).toInt().coerceIn(0, 99))
             }
         }
-        liftSingleTopFolder(staging)
+        liftSingleTopFolder(base)
         onProgress(100)
         return count
     }
 
     /** Places one picked file at the top of [staging] (only the last part of [name] is used). */
-    fun stageFile(name: String, input: InputStream, staging: File) {
+    fun stageFile(name: String, input: InputStream, staging: File, prefix: String = "") {
         require(!name.split('/', '\\').contains("..")) { "Invalid file name: $name" }
         // safePath also refuses control characters, which could forge lines of the rollback marker.
         val fileName = safePath(name.replace('\\', '/').substringAfterLast('/'))
             ?: throw IllegalArgumentException("Invalid file name: $name")
-        staging.mkdirs()
-        write(staging, fileName) { input }
+        val base = under(staging, prefix).apply { mkdirs() }
+        write(base, fileName) { input }
     }
 
     /**
      * Writes a picked folder's files (relative path, how to open it) into [staging] and returns how
      * many it placed; skipped folders and unsafe paths are dropped.
      */
-    fun stageTree(children: List<Pair<String, () -> InputStream>>, staging: File, onProgress: (Int) -> Unit = {}): Int {
-        staging.mkdirs()
+    fun stageTree(
+        children: List<Pair<String, () -> InputStream>>,
+        staging: File,
+        prefix: String = "",
+        onProgress: (Int) -> Unit = {},
+    ): Int {
+        val base = under(staging, prefix).apply { mkdirs() }
         var count = 0
         children.forEachIndexed { i, (name, open) ->
             val path = safePath(name)
             if (path != null && !isSkipped(path)) {
-                write(staging, path, open)
+                write(base, path, open)
                 count++
             }
             onProgress(((i + 1) * 100 / children.size.coerceAtLeast(1)).coerceIn(0, 99))
@@ -95,15 +106,35 @@ object BotImporter {
         return count
     }
 
-    /** What importing [staging] into [botDir] would do. */
-    fun plan(staging: File, botDir: File): ImportPlan {
+    /**
+     * What importing [staging] into [botDir] would do. With a [scope] ("" for the whole bot, "player" for
+     * one folder) it also lists the bot's files there that the import lacks; installed parts and
+     * app-only files (keys, sessions, databases) are never among them.
+     */
+    fun plan(staging: File, botDir: File, scope: String? = null): ImportPlan {
         val files = filesIn(staging)
         val overwrites = files.filter { path ->
             val existing = File(botDir, path)
             existing.isFile && !sameContent(existing, File(staging, path))
         }
-        return ImportPlan(files, overwrites, files.sumOf { File(staging, it).length() })
+        val extras = if (scope == null) emptyList() else extrasIn(botDir, scope, files.toSet())
+        return ImportPlan(files, overwrites, files.sumOf { File(staging, it).length() }, extras)
     }
+
+    private fun extrasIn(botDir: File, scope: String, incoming: Set<String>): List<String> {
+        val top = under(botDir, scope)
+        if (!top.isDirectory) return emptyList()
+        return top.walkTopDown()
+            .onEnter { it == top || it.name !in SKIPPED_FOLDERS }
+            .filter { it.isFile }
+            .map { it.relativeTo(botDir).invariantSeparatorsPath }
+            .filter { it !in incoming && !isSkipped(it) && !FolderSync.isSecret(it.substringAfterLast('/')) }
+            .sorted()
+            .toList()
+    }
+
+    private fun under(dir: File, prefix: String): File =
+        if (prefix.isEmpty()) dir else File(dir, safePath(prefix) ?: throw IOException("Invalid folder: $prefix"))
 
     /**
      * Moves the staged files into [botDir], overwriting files of the same name and leaving every other
@@ -118,6 +149,8 @@ object BotImporter {
         backup: File,
         move: (File, File) -> Unit = ::defaultMove,
         cleanup: (File) -> Unit = { it.deleteRecursively() },
+        /** Extras of [plan] to delete; they are moved aside like replaced files, so a failure brings them back. */
+        remove: List<String> = emptyList(),
     ) {
         // A rollback that itself died left originals saved aside: put them back before anything else,
         // or this import's marker would replace that one and its cleanup would delete them.
@@ -129,7 +162,8 @@ object BotImporter {
                 throw IOException("「$path」は途中の名前と同じファイルがあるため取り込めません")
             }
         }
-        val existing = plan.files.filter { File(botDir, it).isFile }
+        val removing = remove.filter { it in plan.extras && File(botDir, it).isFile }
+        val existing = plan.files.filter { File(botDir, it).isFile } + removing
         val added = plan.files - existing.toSet()
         backup.mkdirs()
         val marker = File(backup, MARKER)
@@ -175,8 +209,9 @@ object BotImporter {
         return top.singleOrNull()?.name
     }
 
-    /** The top-level requirements.txt of the staged files, if any. */
-    fun requirements(staging: File): String? = File(staging, "requirements.txt").takeIf { it.isFile }?.readText()
+    /** The requirements.txt at the top of the imported files ([prefix] inside [staging]), if any. */
+    fun requirements(staging: File, prefix: String = ""): String? =
+        File(under(staging, prefix), "requirements.txt").takeIf { it.isFile }?.readText()
 
     /** Shift_JIS as Windows writes it, under whichever name this platform knows it by. */
     fun shiftJis(): Charset =
@@ -258,7 +293,7 @@ object BotImporter {
     }
 
     /** A relative path with "/" separators that stays inside the folder, or null. */
-    private fun safePath(name: String): String? {
+    fun safePath(name: String): String? {
         val path = name.replace('\\', '/')
         // Control characters would also let a name forge lines of the rollback marker.
         if (path.startsWith("/") || path.contains(':') || path.any { it < ' ' || it.code == 0x7f }) return null

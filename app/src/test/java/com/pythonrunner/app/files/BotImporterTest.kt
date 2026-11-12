@@ -304,4 +304,76 @@ class BotImporterTest {
         assertEquals(100, seen.last())
         assertTrue(seen.all { it in 0..100 })
     }
+
+    private fun write(dir: File, path: String, text: String = "x") =
+        File(dir, path).apply { parentFile!!.mkdirs(); writeText(text) }
+
+    private fun tree(vararg entries: Pair<String, String>): List<Pair<String, () -> java.io.InputStream>> =
+        entries.map { (path, text) -> path to { text.byteInputStream() } }
+
+    @Test fun folderLandsUnderItsNameInTheOpenFolder() {
+        val bot = File(root, "bot").apply { mkdirs() }
+        BotImporter.stageTree(tree("src/a.js" to "a", "package.json" to "{}"), staging, prefix = "player")
+        assertEquals(listOf("player/package.json", "player/src/a.js"), BotImporter.plan(staging, bot, scope = "player").files)
+    }
+
+    @Test fun extrasAreTheOldFilesTheNewFolderLacks() {
+        val bot = File(root, "bot")
+        write(bot, "player/old.js")
+        write(bot, "player/node_modules/x/i.js")
+        write(bot, "bot/x.py")
+        BotImporter.stageTree(tree("package.json" to "{}"), staging, prefix = "player")
+        assertEquals(listOf("player/old.js"), BotImporter.plan(staging, bot, scope = "player").extras)
+        assertEquals(emptyList(), BotImporter.plan(staging, bot).extras)
+    }
+
+    @Test fun replacingTheWholeBotKeepsKeysAndPartsOutOfExtras() {
+        val bot = File(root, "bot")
+        listOf("data/secure.key", "data/sounds.dat", "bot/.venv/bin/python", ".env", "Start.py").forEach { write(bot, it) }
+        BotImporter.stageTree(tree("Start.py" to "new", ".env" to "T=1"), staging)
+        assertEquals(listOf("data/sounds.dat"), BotImporter.plan(staging, bot, scope = "").extras)
+    }
+
+    @Test fun removedExtrasGoAndComeBackOnRollback() {
+        val bot = File(root, "bot")
+        val backup = File(root, "backup")
+        write(bot, "player/old.js", "old")
+        BotImporter.stageTree(tree("package.json" to "{}"), staging, prefix = "player")
+        val plan = BotImporter.plan(staging, bot, scope = "player")
+        var moves = 0
+        assertFailsWith<IllegalStateException> {
+            BotImporter.applyPlan(plan, staging, bot, backup, remove = plan.extras, move = { from, to ->
+                // The removal is moved aside first; placing the new file then fails.
+                if (++moves == 2) error("disk full")
+                to.parentFile?.mkdirs(); from.renameTo(to)
+            })
+        }
+        assertEquals("old", File(bot, "player/old.js").readText())
+        assertFalse(File(bot, "player/package.json").exists())
+
+        BotImporter.applyPlan(plan, staging, bot, backup, remove = plan.extras)
+        assertFalse(File(bot, "player/old.js").exists())
+        assertTrue(File(bot, "player/package.json").isFile)
+        assertFalse(backup.exists())
+    }
+
+    @Test fun zipAndFileGoIntoThePrefix() {
+        BotImporter.stageFile("a.py", "a".byteInputStream(), staging, prefix = "bot")
+        BotImporter.stageZip(zip("pkg/" to "", "pkg/b.py" to "b"), staging, prefix = "lib")
+        assertEquals(listOf("bot/a.py", "lib/b.py"), stagedPaths())
+    }
+
+    @Test fun folderOverAFileOfTheSameNameIsRefused() {
+        val bot = File(root, "bot")
+        write(bot, "player", "a file")
+        BotImporter.stageTree(tree("package.json" to "{}"), staging, prefix = "player")
+        val plan = BotImporter.plan(staging, bot, scope = "player")
+        assertFailsWith<java.io.IOException> { BotImporter.applyPlan(plan, staging, bot, File(root, "backup")) }
+        assertEquals("a file", File(bot, "player").readText())
+    }
+
+    @Test fun requirementsAreReadUnderThePrefix() {
+        BotImporter.stageTree(tree("requirements.txt" to "discord.py"), staging, prefix = "bot")
+        assertEquals("discord.py", BotImporter.requirements(staging, "bot"))
+    }
 }
