@@ -624,7 +624,8 @@ object BotController {
             }
             importPrefix = prefix
             if (botId != null) importScope = prefix
-            stageFolderFrom(app, treeUri, staging, prefix)
+            // A new bot from a ZIP unpacked on the phone: its one inner folder is the bot.
+            stageFolderFrom(app, treeUri, staging, prefix, liftSingleTop = botId == null)
         }
 
     /**
@@ -634,7 +635,7 @@ object BotController {
     fun replaceBot(context: Context, uri: Uri, botId: String, zip: Boolean) =
         startImport(context, uri, Target.Existing(botId)) { app, staging ->
             importScope = ""
-            if (zip) stageFileFrom(app, uri, staging, "") else stageFolderFrom(app, uri, staging, "")
+            if (zip) stageFileFrom(app, uri, staging, "") else stageFolderFrom(app, uri, staging, "", liftSingleTop = true)
         }
 
     private fun folderName(app: Context, treeUri: Uri): String? = runCatching {
@@ -664,10 +665,10 @@ object BotController {
         }
     }
 
-    private fun stageFolderFrom(app: Context, treeUri: Uri, staging: File, prefix: String): Int {
+    private fun stageFolderFrom(app: Context, treeUri: Uri, staging: File, prefix: String, liftSingleTop: Boolean = false): Int {
         val files = SafTree.list(app, treeUri).filter { !BotImporter.isSkipped(it.path) }
         requireSpace(files.sumOf { it.size }, app.filesDir)
-        return BotImporter.stageTree(files.map { it.path to it.open }, staging, prefix) {
+        return BotImporter.stageTree(files.map { it.path to it.open }, staging, prefix, liftSingleTop) {
             _importState.value = ImportState.Working(it)
         }
     }

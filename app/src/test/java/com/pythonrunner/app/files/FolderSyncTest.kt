@@ -132,6 +132,10 @@ class FolderSyncTest {
             .forEach { assertFalse(FolderSync.isSecret(it), it) }
     }
 
+    @Test fun envExamplesHoldNoValuesAndAreShared() =
+        listOf(".env.example", ".env.sample", ".env.template", ".ENV.EXAMPLE")
+            .forEach { assertFalse(FolderSync.isSecret(it), it) }
+
     @Test fun exportSkipsKeysAndDatabases() {
         write(private, "main.py", "x")
         write(private, "data/users.db", "x")

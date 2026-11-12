@@ -90,6 +90,8 @@ object BotImporter {
         children: List<Pair<String, () -> InputStream>>,
         staging: File,
         prefix: String = "",
+        /** A folder holding nothing but one folder is that folder (a ZIP unpacked on the phone), as for ZIPs. */
+        liftSingleTop: Boolean = false,
         onProgress: (Int) -> Unit = {},
     ): Int {
         val base = under(staging, prefix).apply { mkdirs() }
@@ -102,6 +104,7 @@ object BotImporter {
             }
             onProgress(((i + 1) * 100 / children.size.coerceAtLeast(1)).coerceIn(0, 99))
         }
+        if (liftSingleTop) liftSingleTopFolder(base)
         onProgress(100)
         return count
     }

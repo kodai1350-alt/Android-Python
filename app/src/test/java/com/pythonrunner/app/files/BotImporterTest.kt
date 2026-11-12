@@ -383,6 +383,17 @@ class BotImporterTest {
         assertEquals(emptyList(), BotImporter.plan(staging, bot, scope = "").extras)
     }
 
+    @Test fun aFolderHoldingOnlyOneFolderIsLiftedLikeAZip() {
+        // A ZIP unpacked on the phone: 入退室音-Android/入退室音/{Start.py, bot/…}.
+        BotImporter.stageTree(tree("入退室音/Start.py" to "s", "入退室音/bot/main.py" to "m"), staging, liftSingleTop = true)
+        assertEquals(listOf("Start.py", "bot/main.py"), stagedPaths())
+    }
+
+    @Test fun aLoneFolderStaysWhenNotAskedToLift() {
+        BotImporter.stageTree(tree("src/a.js" to "a"), staging, prefix = "player")
+        assertEquals(listOf("player/src/a.js"), stagedPaths())
+    }
+
     @Test fun requirementsAreReadUnderThePrefix() {
         BotImporter.stageTree(tree("requirements.txt" to "discord.py"), staging, prefix = "bot")
         assertEquals("discord.py", BotImporter.requirements(staging, "bot"))

@@ -269,6 +269,8 @@ class FolderSync(
             // folder brought from a PC brings it along (the risk was explained and accepted).
             if (name == ".env") return false
             val lower = name.lowercase()
+            // Examples of a .env hold names, not values.
+            if (lower in setOf(".env.example", ".env.sample", ".env.template")) return false
             return lower == ".env" || lower.startsWith(".env.") ||
                 SECRET_EXTENSIONS.any { lower.endsWith(it) } ||
                 SECRET_WORDS.any { it in lower }

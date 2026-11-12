@@ -72,6 +72,7 @@ class FileTreeTest {
         assertEquals("フォルダ", FileTree.kind("cogs", isDirectory = true))
         assertEquals("Python", FileTree.kind("main.py", isDirectory = false))
         assertEquals("トークンなど", FileTree.kind(".env", isDirectory = false))
+        assertEquals(".env の見本", FileTree.kind(".env.example", isDirectory = false))
         assertEquals("ライブラリ一覧", FileTree.kind("requirements.txt", isDirectory = false))
         assertEquals("設定", FileTree.kind("config.json", isDirectory = false))
         assertEquals("テキスト", FileTree.kind("README.md", isDirectory = false))

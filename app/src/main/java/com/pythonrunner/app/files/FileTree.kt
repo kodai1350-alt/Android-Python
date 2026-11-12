@@ -57,6 +57,7 @@ object FileTree {
         return when {
             ext == "py" -> "Python"
             lower == ".env" -> "トークンなど"
+            lower in setOf(".env.example", ".env.sample", ".env.template") -> ".env の見本"
             lower.startsWith(".env.") -> "秘密の値"
             lower == "requirements.txt" -> "ライブラリ一覧"
             ext in CONFIG -> "設定"
