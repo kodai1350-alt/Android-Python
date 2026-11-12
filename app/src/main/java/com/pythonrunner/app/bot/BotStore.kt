@@ -22,6 +22,8 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
     val manifestFile = File(dir, "shared.manifest")
     val stagingDir = File(dir, "import-staging")
     val backupDir = File(dir, "import-backup")
+    /** The bot's recycle bin (outside code/, so it never runs and is never shared). */
+    val trashDir = File(dir, "trash")
 
     private val keyMain = "bot.$id.mainFile"
     private val keyEnv = "bot.$id.envVars"

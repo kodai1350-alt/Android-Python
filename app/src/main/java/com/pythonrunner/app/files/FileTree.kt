@@ -86,6 +86,43 @@ object FileTree {
         return file.delete() || !file.exists()
     }
 
+    /** A folder that is not a link. */
+    fun isRealDirectory(file: File): Boolean = Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)
+
+    /** Bytes in [file] and, for a folder, everything in it; links are not entered (and count as 0). */
+    fun sizeOf(file: File): Long {
+        val path = file.toPath()
+        if (Files.isSymbolicLink(path)) return 0
+        if (isRealDirectory(file)) return file.listFiles().orEmpty().sumOf { sizeOf(it) }
+        return if (file.isFile) file.length() else 0
+    }
+
+    /**
+     * Copies [from] to [to] (which must not exist) without following links: a link is copied as a link,
+     * and [skip] leaves out whatever it names (with everything inside).
+     */
+    fun copyTree(from: File, to: File, skip: (File) -> Boolean = { false }) {
+        if (skip(from)) return
+        val path = from.toPath()
+        to.parentFile?.mkdirs()
+        when {
+            Files.isSymbolicLink(path) -> Files.copy(path, to.toPath(), LinkOption.NOFOLLOW_LINKS)
+            isRealDirectory(from) -> {
+                if (!to.mkdir() && !to.isDirectory) throw java.io.IOException("$to を作れませんでした")
+                from.listFiles().orEmpty().forEach { copyTree(it, File(to, it.name), skip) }
+            }
+            else -> from.copyTo(to)
+        }
+    }
+
+    /** Moves [from] to [to]: renamed when possible, else copied without following links and then deleted. */
+    fun moveTree(from: File, to: File) {
+        to.parentFile?.mkdirs()
+        if (from.renameTo(to)) return
+        copyTree(from, to)
+        if (!deleteTree(from)) throw java.io.IOException("$from を移せませんでした")
+    }
+
     /** Folders the app fills itself (npm, the .venv link): shown, never deleted by hand. */
     fun isInstalledPart(name: String): Boolean = name == "node_modules" || name == ".venv"
 
