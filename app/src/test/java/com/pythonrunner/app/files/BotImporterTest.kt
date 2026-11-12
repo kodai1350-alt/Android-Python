@@ -102,7 +102,7 @@ class BotImporterTest {
         assertEquals(listOf("cogs/a.py", "main.py"), stagedPaths())
     }
 
-    @Test fun planListsOnlyChangedExistingFilesAsOverwrites() {
+    @Test fun planListsEveryTakenNameAsAnOverwriteLikeWindows() {
         put(botDir, "main.py", "A")
         put(botDir, "data.json", "X")
         put(botDir, "keep.db", "Z")
@@ -110,7 +110,7 @@ class BotImporterTest {
         put(staging, "data.json", "X")
         put(staging, "new.py", "N")
         val plan = BotImporter.plan(staging, botDir)
-        assertEquals(listOf("main.py"), plan.overwrites)
+        assertEquals(listOf("data.json", "main.py"), plan.overwrites)
         assertEquals(listOf("data.json", "main.py", "new.py"), plan.files)
     }
 
@@ -397,5 +397,63 @@ class BotImporterTest {
     @Test fun requirementsAreReadUnderThePrefix() {
         BotImporter.stageTree(tree("requirements.txt" to "discord.py"), staging, prefix = "bot")
         assertEquals("discord.py", BotImporter.requirements(staging, "bot"))
+    }
+
+    @Test fun replacedOriginalsAreHandedOverAtCommit() {
+        val bot = File(root, "bot2")
+        val backup = File(root, "backup2")
+        write(bot, "a.py", "old")
+        BotImporter.stageTree(tree("a.py" to "new", "b.py" to "b"), staging)
+        val got = mutableListOf<Pair<String, String>>()
+        BotImporter.applyPlan(BotImporter.plan(staging, bot), staging, bot, backup, onReplaced = { f, p -> got += p to f.readText() })
+        assertEquals(listOf("a.py" to "old"), got)
+        assertEquals("new", File(bot, "a.py").readText())
+    }
+
+    @Test fun nothingIsHandedOverWhenTheImportRollsBack() {
+        val bot = File(root, "bot3")
+        write(bot, "a.py", "old")
+        BotImporter.stageTree(tree("a.py" to "new", "b.py" to "b"), staging)
+        val got = mutableListOf<String>()
+        var moves = 0
+        assertFailsWith<IllegalStateException> {
+            BotImporter.applyPlan(
+                BotImporter.plan(staging, bot), staging, bot, File(root, "backup3"),
+                move = { from, to -> if (++moves == 3) error("disk full"); to.parentFile?.mkdirs(); from.renameTo(to) },
+                onReplaced = { _, p -> got += p },
+            )
+        }
+        assertEquals(emptyList(), got)
+        assertEquals("old", File(bot, "a.py").readText())
+    }
+
+    @Test fun resolveSkipAndBoth() {
+        val bot = File(root, "bot4")
+        write(bot, "a.py", "old")
+        write(bot, "c.py", "oldc")
+        BotImporter.stageTree(tree("a.py" to "new", "c.py" to "newc", "d.py" to "d"), staging)
+        val plan = BotImporter.plan(staging, bot)
+        val resolved = BotImporter.resolve(
+            plan, staging, bot, Resolution.PerFile(mapOf("a.py" to Keep.EXISTING, "c.py" to Keep.BOTH)),
+        )
+        assertEquals(listOf("c (2).py", "d.py"), resolved.files)
+        assertEquals(emptyList(), resolved.overwrites)
+        BotImporter.applyPlan(resolved, staging, bot, File(root, "backup4"))
+        assertEquals("old", File(bot, "a.py").readText())
+        assertEquals("oldc", File(bot, "c.py").readText())
+        assertEquals("newc", File(bot, "c (2).py").readText())
+    }
+
+    @Test fun overwritesIgnoreCase() {
+        val bot = File(root, "bot5")
+        write(bot, "Main.py", "x")
+        BotImporter.stageTree(tree("main.py" to "y"), staging)
+        val plan = BotImporter.plan(staging, bot)
+        assertEquals(listOf("main.py"), plan.overwrites)
+        val got = mutableListOf<String>()
+        BotImporter.applyPlan(plan, staging, bot, File(root, "backup5"), onReplaced = { _, p -> got += p })
+        assertEquals(listOf("Main.py"), got)
+        assertEquals(listOf("main.py"), bot.list()!!.toList())
+        assertEquals("y", File(bot, "main.py").readText())
     }
 }

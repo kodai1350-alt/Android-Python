@@ -62,7 +62,7 @@ class FolderSync(
      * Brings the confirmed changes into the private folder. A file is only imported if its content
      * still matches what the user confirmed; the others are returned (they stay pending).
      */
-    fun importChanges(changes: SyncChanges): List<String> {
+    fun importChanges(changes: SyncChanges, beforeChange: (File, String) -> Unit = { _, _ -> }): List<String> {
         synchronized(LOCK) {
             val manifest = readManifest().toMutableMap()
             val skipped = mutableListOf<String>()
@@ -82,12 +82,15 @@ class FolderSync(
                     skipped += path
                     continue
                 }
+                // What is about to be replaced goes to the caller (the recycle bin) first.
+                if (target.isFile) runCatching { beforeChange(target, path) }
                 staging.copyTo(target, overwrite = true)
                 staging.delete()
                 manifest[path] = expected
             }
             for (path in changes.removed) {
                 val target = resolveUnder(privateDir, path) ?: continue
+                if (target.isFile) runCatching { beforeChange(target, path) }
                 target.delete()
                 manifest.remove(path)
             }

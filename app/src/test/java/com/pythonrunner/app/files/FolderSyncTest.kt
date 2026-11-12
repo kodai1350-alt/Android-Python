@@ -332,4 +332,17 @@ class FolderSyncTest {
         write(shared, "main.py", "v2").setLastModified(System.currentTimeMillis() + 60_000)
         assertTrue(first != sync.fingerprint())
     }
+
+    @Test fun importChangesHandsOverWhatItReplacesOrDeletes() {
+        write(private, "a.py", "old")
+        write(private, "b.py", "b")
+        sync.export()
+        write(shared, "a.py", "new")
+        File(shared, "b.py").delete()
+        val got = mutableListOf<Pair<String, String>>()
+        sync.importChanges(sync.pendingImports()) { f, p -> got += p to f.readText() }
+        assertEquals(listOf("a.py" to "old", "b.py" to "b"), got.sortedBy { it.first })
+        assertEquals("new", read(private, "a.py"))
+        assertFalse(File(private, "b.py").exists())
+    }
 }

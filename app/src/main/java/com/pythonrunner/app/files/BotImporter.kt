@@ -116,10 +116,8 @@ object BotImporter {
      */
     fun plan(staging: File, botDir: File, scope: String? = null): ImportPlan {
         val files = filesIn(staging)
-        val overwrites = files.filter { path ->
-            val existing = File(botDir, path)
-            existing.isFile && !sameContent(existing, File(staging, path))
-        }
+        // Like Windows: every taken name counts, whatever the content, and letter case does not tell names apart.
+        val overwrites = files.filter { existingFile(botDir, it) != null }
         val extras = if (scope == null) emptyList() else extrasIn(botDir, scope, files.toSet())
         return ImportPlan(files, overwrites, files.sumOf { File(staging, it).length() }, extras)
     }
@@ -135,6 +133,49 @@ object BotImporter {
             .filter { it !in incoming && !isSkipped(it) && !FolderSync.isSecret(it.substringAfterLast('/')) }
             .sorted()
             .toList()
+    }
+
+    /** The bot's file that [path] would replace: the same name in the same folder, ignoring letter case. */
+    private fun existingFile(botDir: File, path: String): String? {
+        val parentPath = path.substringBeforeLast('/', "")
+        val name = path.substringAfterLast('/')
+        val parent = if (parentPath.isEmpty()) botDir else File(botDir, parentPath)
+        val match = parent.listFiles().orEmpty().firstOrNull { it.isFile && FileNames.sameName(it.name, name) } ?: return null
+        return if (parentPath.isEmpty()) match.name else "$parentPath/${match.name}"
+    }
+
+    /**
+     * Applies the answer to 「ファイルの置換またはスキップ」 to a staged import: a file kept as it is leaves the
+     * import, and one kept beside the old file is renamed 「name (2).ext」 in staging.
+     */
+    fun resolve(plan: ImportPlan, staging: File, botDir: File, resolution: Resolution): ImportPlan {
+        val files = plan.files.toMutableList()
+        val overwrites = mutableListOf<String>()
+        for (path in plan.overwrites) {
+            val keep = when (resolution) {
+                Resolution.ReplaceAll -> Keep.INCOMING
+                Resolution.SkipAll -> Keep.EXISTING
+                is Resolution.PerFile -> resolution.keep[path] ?: Keep.EXISTING
+            }
+            when (keep) {
+                Keep.INCOMING -> overwrites += path
+                Keep.EXISTING -> {
+                    File(staging, path).delete()
+                    files -= path
+                }
+                Keep.BOTH -> {
+                    val parentPath = path.substringBeforeLast('/', "")
+                    val taken = (File(botDir, parentPath).list().orEmpty().toList() +
+                        File(staging, parentPath).list().orEmpty().toList())
+                    val name = FileNames.unique(path.substringAfterLast('/'), taken)
+                    val renamed = if (parentPath.isEmpty()) name else "$parentPath/$name"
+                    if (!File(staging, path).renameTo(File(staging, renamed))) throw IOException("「$name」を用意できませんでした")
+                    files[files.indexOf(path)] = renamed
+                }
+            }
+        }
+        val sorted = files.sorted()
+        return plan.copy(files = sorted, overwrites = overwrites, bytes = sorted.sumOf { File(staging, it).length() })
     }
 
     private fun under(dir: File, prefix: String): File =
@@ -155,6 +196,8 @@ object BotImporter {
         cleanup: (File) -> Unit = { it.deleteRecursively() },
         /** Extras of [plan] to delete; they are moved aside like replaced files, so a failure brings them back. */
         remove: List<String> = emptyList(),
+        /** Gets each file the import replaced or removed (as saved aside, and its path) once the import stands. */
+        onReplaced: (File, String) -> Unit = { _, _ -> },
     ) {
         // A rollback that itself died left originals saved aside: put them back before anything else,
         // or this import's marker would replace that one and its cleanup would delete them.
@@ -167,8 +210,10 @@ object BotImporter {
             }
         }
         val removing = remove.filter { it in plan.extras && File(botDir, it).isFile }
-        val existing = plan.files.filter { File(botDir, it).isFile } + removing
-        val added = plan.files - existing.toSet()
+        // A file of another letter case is moved aside too, so the two never stand side by side.
+        val replacing = plan.files.mapNotNull { existingFile(botDir, it) }
+        val existing = (replacing + removing).distinct()
+        val added = plan.files.filter { it !in existing }
         backup.mkdirs()
         val marker = File(backup, MARKER)
         // Written whole and then renamed into place, so a kill mid-write never leaves a half line.
@@ -190,6 +235,8 @@ object BotImporter {
         }
         // The commit point: once the marker is gone the import stands, whatever the cleanup gets to.
         if (!marker.delete()) throw IOException("取り込みを確定できませんでした")
+        // What it replaced goes to the recycle bin (the caller's), before the backup is cleared.
+        for (path in existing) runCatching { onReplaced(File(backup, "$FILES/$path"), path) }
         cleanup(backup)
         staging.deleteRecursively()
     }
