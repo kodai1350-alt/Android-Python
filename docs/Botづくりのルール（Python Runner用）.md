@@ -98,7 +98,7 @@ ROOT = Path(__file__).resolve().parent.parent  # tools/ の 1 つ上 = Bot の�
 NAME = ROOT.name
 OUT = ROOT / f"{NAME}-Android.zip"
 SKIP_DIRS = {"__pycache__", ".git", "venv", ".venv", "node_modules", "__MACOSX", ".idea", ".vscode", ".pytest_cache"}
-SKIP_FILES = {OUT.name, ".DS_Store", "Thumbs.db", ".gitignore"}
+SKIP_FILES = {OUT.name, ".DS_Store", "Thumbs.db", ".gitignore", "Botづくりのルール（Python Runner用）.md"}
 
 def files():
     for path in sorted(ROOT.rglob("*")):
@@ -110,13 +110,17 @@ def files():
 with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
     count = 0
     for path, rel in files():
-        # 中は「〈Bot の名前〉/…」の形にする（アプリが上のフォルダを 1 段外す）。区切りは / にする。
-        z.write(path, f"{NAME}/{rel.as_posix()}")
+        # Bot のファイルを ZIP のいちばん上に置く（展開すると「ZIP 名のフォルダ > 本体」になり、フォルダが二重にならない）。
+        # 区切りは / にする。
+        z.write(path, rel.as_posix())
         count += 1
 print(f"{OUT.name} を作りました（{count} 個のファイル）")
 print("※ .env（トークン）も入っています。この ZIP は人に渡さないでください。")
 ```
 
+- ZIP の中は、Bot のファイルがいちばん上に並ぶ形にする（`main.py` が ZIP のいちばん上）。展開したときに
+  「〈Bot の名前〉-Android > 〈Bot の名前〉 > 本体」と二重にならず、「〈Bot の名前〉-Android > 本体」になること。
+- このルールのファイル（`Botづくりのルール（Python Runner用）.md`）は ZIP に入れない。
 - ZIP の中に `.env` が入るので、スマホで取り込めばトークンもそのまま使える。**この ZIP は人に渡さない**。
 - ZIP を作ったら、入ったファイルの一覧と、`main.py` が一番上にあることを確かめて教えてください。
 
