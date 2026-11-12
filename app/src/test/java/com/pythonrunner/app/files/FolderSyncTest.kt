@@ -270,7 +270,11 @@ class FolderSyncTest {
         sync.markSynced(listOf("bot.py"))
         assertTrue(sync.pendingImports().isEmpty, sync.pendingImports().toString())
         write(private, ".git/HEAD", "ref")
+        // Parts the app installs on the phone stay on the phone.
+        write(private, "player/node_modules/discord.js/index.js", "js")
+        write(private, "bot/.venv/bin/python", "py")
         sync.export()
+        assertFalse(File(shared, "player/node_modules").exists())
         assertEquals(SharedState.InSync, sync.state(null))
     }
 

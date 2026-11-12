@@ -23,7 +23,8 @@ object BotImporter {
      * Folders never imported, at any depth: caches, version control, virtual environments, and the
      * resource forks macOS Finder adds to ZIPs.
      */
-    val SKIPPED_FOLDERS = setOf("__pycache__", ".git", "venv", ".venv", "__MACOSX")
+    // node_modules: installed by npm on the phone, thousands of files that are never the bot's own.
+    val SKIPPED_FOLDERS = setOf("__pycache__", ".git", "venv", ".venv", "__MACOSX", "node_modules")
     private val SKIPPED_FILES = setOf(".DS_Store")
 
     fun isSkipped(relativePath: String): Boolean {

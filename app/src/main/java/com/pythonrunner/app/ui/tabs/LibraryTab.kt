@@ -14,9 +14,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pythonrunner.app.process.LogLine
+import com.pythonrunner.app.python.BotParts
 import com.pythonrunner.app.python.PipCommands
 import com.pythonrunner.app.python.PipInput
 import com.pythonrunner.app.service.BotController
@@ -84,5 +87,39 @@ fun LibraryTab(botId: String, packages: String, onPackagesChange: (String) -> Un
     }
     if (workLog.isNotEmpty()) {
         Section("作業の出力") { LogView(workLog, context) }
+    }
+
+    // SPIKE: bots made of a Python part and a Node.js part (e.g. a voice bot) get their parts in one go.
+    val parts = remember(botId, busy) {
+        BotParts.nodeProjects(store.codeDir).isNotEmpty() ||
+            BotParts.requirementFiles(store.codeDir).any { it.parentFile != store.codeDir }
+    }
+    if (parts) {
+        val partsLog = remember(botId) { mutableStateListOf<LogLine>() }
+        var partsResult by remember(botId) { mutableStateOf<WorkResult?>(null) }
+        Section("Botの部品（試験）") {
+            Text(
+                "フォルダの中の requirements.txt と package.json を見つけて、Python のライブラリと Node.js の部品（npm）をまとめて入れます。" +
+                    "Botを止めてから押してください（数分かかります）。",
+                fontSize = 12.sp, color = Color.DarkGray,
+            )
+            partsResult?.let { WorkResultView(it) }
+            Button(enabled = !busy, onClick = {
+                partsLog.clear()
+                partsResult = WorkResult.Working("部品を入れています…")
+                BotController.workBusy.value = true
+                BotController.runBotParts(
+                    context, botId,
+                    onLine = { line -> ContextCompat.getMainExecutor(context).execute { partsLog += line } },
+                    onExit = { code ->
+                        ContextCompat.getMainExecutor(context).execute {
+                            BotController.workBusy.value = false
+                            partsResult = if (code == 0) WorkResult.Done("部品を入れました") else WorkResult.Failed("部品を入れられませんでした")
+                        }
+                    },
+                )
+            }) { Text("部品をまとめて入れる") }
+            if (partsLog.isNotEmpty()) LogView(partsLog, context, height = 320.dp)
+        }
     }
 }
