@@ -15,7 +15,7 @@ object DotEnv {
     fun parse(text: String): Parsed {
         val values = LinkedHashMap<String, String>()
         val bad = mutableListOf<Int>()
-        text.removePrefix("﻿").split('\n').forEachIndexed { index, raw ->
+        text.removePrefix("\uFEFF").split('\n').forEachIndexed { index, raw ->
             val line = raw.removeSuffix("\r").trim()
             if (line.isEmpty() || line.startsWith("#")) return@forEachIndexed
             val pair = parseLine(line.removePrefix("export ").trimStart())
@@ -49,7 +49,7 @@ object DotEnv {
     /** The names in [text], in file order, each once. */
     fun names(text: String): List<String> {
         val names = LinkedHashSet<String>()
-        for (raw in text.removePrefix("﻿").split('\n')) {
+        for (raw in text.removePrefix("\uFEFF").split('\n')) {
             val line = raw.removeSuffix("\r").trim()
             if (line.isEmpty() || line.startsWith("#")) continue
             parseLine(line.removePrefix("export ").trimStart())?.let { names += it.first }

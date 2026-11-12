@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 
 class DotEnvTest {
     @Test fun parsesTheCommonForms() {
-        val parsed = DotEnv.parse("﻿A=1\r\n# c\r\nexport B = two \nC=\"x # y\"\nD='q=r'\nE=\nF=v # note\n")
+        val parsed = DotEnv.parse("\uFEFFA=1\r\n# c\r\nexport B = two \nC=\"x # y\"\nD='q=r'\nE=\nF=v # note\n")
         assertEquals(mapOf("A" to "1", "B" to "two", "C" to "x # y", "D" to "q=r", "E" to "", "F" to "v"), parsed.values)
         assertEquals(emptyList(), parsed.badLines)
     }
