@@ -1,6 +1,8 @@
 package com.pythonrunner.app.files
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.util.Locale
 
 data class FileEntry(
@@ -64,8 +66,24 @@ object FileTree {
         }
     }
 
-    /** Files at any depth under [dir] (what deleting the folder would remove). */
-    fun fileCount(dir: File): Int = dir.walkTopDown().count { it.isFile }
+    /** Files at any depth under [dir] (what deleting the folder would remove); links are counted, not entered. */
+    fun fileCount(dir: File): Int {
+        val path = dir.toPath()
+        if (Files.isSymbolicLink(path)) return 1
+        if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return if (dir.isFile) 1 else 0
+        return dir.listFiles().orEmpty().sumOf { fileCount(it) }
+    }
+
+    /**
+     * Deletes [file] and, for a folder, everything in it. A link is removed itself and never entered:
+     * a bot may link to a folder elsewhere, whose files must survive. True when it is gone.
+     */
+    fun deleteTree(file: File): Boolean {
+        val path = file.toPath()
+        if (Files.isSymbolicLink(path)) return runCatching { Files.delete(path) }.isSuccess
+        if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) file.listFiles().orEmpty().forEach { deleteTree(it) }
+        return file.delete() || !file.exists()
+    }
 
     /** Folders the app fills itself (npm, the .venv link): shown, never deleted by hand. */
     fun isInstalledPart(name: String): Boolean = name == "node_modules" || name == ".venv"

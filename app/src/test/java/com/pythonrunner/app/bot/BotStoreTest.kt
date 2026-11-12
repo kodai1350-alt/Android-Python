@@ -90,6 +90,19 @@ class BotStoreTest {
         store("a").deleteAll()
         assertEquals(emptyMap(), store("a").partsInstalled)
     }
+
+    @Test fun deletingAFolderNeverFollowsLinksOutOfIt() {
+        val outside = File(root, "outside").apply { mkdirs() }
+        write(outside, "keep.txt")
+        val a = store("a")
+        write(a.codeDir, "bot/x.py")
+        val link = File(a.codeDir, "bot/linked").toPath()
+        // Creating links needs a privilege on some Windows setups: then there is nothing to test here.
+        if (runCatching { Files.createSymbolicLink(link, outside.toPath()) }.isFailure) return
+        assertTrue(a.deleteFile("bot"))
+        assertFalse(File(a.codeDir, "bot").exists())
+        assertTrue(File(outside, "keep.txt").exists())
+    }
 }
 
 class MapKeyValue : KeyValue {

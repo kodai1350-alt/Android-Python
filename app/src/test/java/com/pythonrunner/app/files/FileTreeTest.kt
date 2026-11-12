@@ -90,4 +90,13 @@ class FileTreeTest {
         assertEquals(true, FileTree.isInstalledPart(".venv"))
         assertEquals(false, FileTree.isInstalledPart("venv"))
     }
+
+    @Test fun fileCountDoesNotFollowLinks() {
+        val outside = Files.createTempDirectory("out").toFile()
+        File(outside, "a").writeText("x")
+        File(outside, "b").writeText("x")
+        file("src/one")
+        if (runCatching { Files.createSymbolicLink(File(root, "src/link").toPath(), outside.toPath()) }.isFailure) return
+        assertEquals(2, FileTree.fileCount(File(root, "src")))
+    }
 }

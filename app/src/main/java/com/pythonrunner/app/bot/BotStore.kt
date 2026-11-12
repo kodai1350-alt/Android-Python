@@ -1,5 +1,6 @@
 package com.pythonrunner.app.bot
 
+import com.pythonrunner.app.files.FileTree
 import java.io.File
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -50,9 +51,17 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
      */
     fun deleteFile(relativePath: String): Boolean {
         val root = codeDir.canonicalFile
-        val target = File(codeDir, relativePath).canonicalFile
-        if (relativePath.isEmpty() || target == root || !target.path.startsWith(root.path + File.separator)) return false
-        if (!target.exists() || !target.deleteRecursively()) return false
+        val raw = File(codeDir, relativePath)
+        // The folder holding it is resolved; the entry itself is not, so a link is deleted, not its target.
+        val parent = raw.parentFile?.canonicalFile ?: return false
+        if (relativePath.isEmpty() || raw.name == ".." || raw.name == "." ||
+            parent != root && !parent.path.startsWith(root.path + File.separator)
+        ) {
+            return false
+        }
+        val target = File(parent, raw.name)
+        if (!target.exists() && !java.nio.file.Files.isSymbolicLink(target.toPath())) return false
+        if (!FileTree.deleteTree(target)) return false
         forgetMissingMain()
         return true
     }
@@ -65,7 +74,7 @@ class BotStore(val id: String, botsRoot: File, private val prefs: KeyValue) {
 
     /** Removes the bot's files, packages and settings (secrets included). */
     fun deleteAll() {
-        dir.deleteRecursively()
+        FileTree.deleteTree(dir)
         keys(id).forEach { prefs.put(it, null) }
     }
 
