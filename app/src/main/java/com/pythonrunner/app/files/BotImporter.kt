@@ -125,8 +125,9 @@ object BotImporter {
         val top = under(botDir, scope)
         if (!top.isDirectory) return emptyList()
         return top.walkTopDown()
-            .onEnter { it == top || it.name !in SKIPPED_FOLDERS }
-            .filter { it.isFile }
+            // A link to a folder elsewhere is never entered: 消す must not reach files outside the bot.
+            .onEnter { it == top || it.name !in SKIPPED_FOLDERS && !java.nio.file.Files.isSymbolicLink(it.toPath()) }
+            .filter { it.isFile && !java.nio.file.Files.isSymbolicLink(it.toPath()) }
             .map { it.relativeTo(botDir).invariantSeparatorsPath }
             .filter { it !in incoming && !isSkipped(it) && !FolderSync.isSecret(it.substringAfterLast('/')) }
             .sorted()

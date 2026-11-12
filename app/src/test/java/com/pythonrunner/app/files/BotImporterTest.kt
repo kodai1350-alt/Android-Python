@@ -372,6 +372,17 @@ class BotImporterTest {
         assertEquals("a file", File(bot, "player").readText())
     }
 
+    @Test fun extrasNeverReachThroughALinkOutOfTheBot() {
+        val bot = File(root, "bot")
+        val outside = File(root, "outside").apply { mkdirs() }
+        write(outside, "precious.txt")
+        write(bot, "Start.py")
+        // Creating links needs a privilege on some Windows setups: then there is nothing to test here.
+        if (runCatching { Files.createSymbolicLink(File(bot, "linked").toPath(), outside.toPath()) }.isFailure) return
+        BotImporter.stageTree(tree("Start.py" to "new"), staging)
+        assertEquals(emptyList(), BotImporter.plan(staging, bot, scope = "").extras)
+    }
+
     @Test fun requirementsAreReadUnderThePrefix() {
         BotImporter.stageTree(tree("requirements.txt" to "discord.py"), staging, prefix = "bot")
         assertEquals("discord.py", BotImporter.requirements(staging, "bot"))
