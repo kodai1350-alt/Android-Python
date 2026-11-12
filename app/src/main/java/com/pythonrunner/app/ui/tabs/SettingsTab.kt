@@ -26,11 +26,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.ui.text.font.FontFamily
+import java.io.File
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pythonrunner.app.bot.duplicateNames
+import com.pythonrunner.app.bot.DotEnv
 import com.pythonrunner.app.service.BotController
 import com.pythonrunner.app.ui.DeleteBotDialog
 import com.pythonrunner.app.ui.Gray
@@ -41,7 +42,6 @@ import com.pythonrunner.app.ui.Section
 import com.pythonrunner.app.ui.rememberUiPrefs
 
 /** One editable line of the secrets section. */
-private data class SecretRow(val name: String, val value: String, val shown: Boolean = false)
 
 /** The file to run first, secret values, the bot's name, and deleting it. */
 @Composable
@@ -75,7 +75,7 @@ fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: In
         if (pyFiles.isEmpty()) Text("まだ .py ファイルがありません（「ファイル」タブで取り込めます）", fontSize = 12.sp, color = Gray)
     }
 
-    SecretsSection(botId)
+    EnvSection(botId, filesVersion)
 
     Section("Botの名前") {
         var newName by remember(name) { mutableStateOf(name) }
@@ -105,70 +105,59 @@ fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: In
     }
 }
 
+/**
+ * The bot's .env: the names it sets, values hidden; 「表示して編集」 opens the whole file for editing.
+ * It is the same file as in the bot's folder (and the shared folder), so it can be edited on a PC too.
+ */
 @Composable
-private fun SecretsSection(botId: String) {
+private fun EnvSection(botId: String, filesVersion: Int) {
     val context = LocalContext.current
     val prefs = rememberUiPrefs()
-    val store = remember(botId) { BotController.store(context, botId) }
-    val secrets = remember(botId) {
-        mutableStateListOf<SecretRow>().apply { addAll(store.envVars.map { (k, v) -> SecretRow(k, v) }) }
-    }
-    var savedSecrets by remember(botId) { mutableStateOf(store.envVars) }
+    val file = remember(botId) { File(BotController.store(context, botId).codeDir, DotEnv.FILE) }
+    var saved by remember(botId, filesVersion) { mutableStateOf(if (file.isFile) file.readText() else null) }
+    var editing by remember(botId) { mutableStateOf<String?>(null) }
     var justSaved by remember(botId) { mutableStateOf(false) }
 
-    Section("秘密の値（トークンなど）※使わなくてもOK") {
-        Help("secrets", prefs) {
-            Text(
-                "トークンをBotのコードに直接書かずに済ませるための保管場所です。" +
-                    "ここに入れた値は、Botの中で os.environ[\"名前\"] で読めます。" +
-                    "コードにトークンを直接書いているなら、ここは空のままで大丈夫です。",
-                fontSize = 13.sp,
-                color = Color.DarkGray,
-            )
-        }
-        secrets.forEachIndexed { index, row ->
-            Column(Modifier.fillMaxWidth()) {
+    Section(".env（トークンなど）") {
+        val text = editing
+        when {
+            text != null -> {
                 OutlinedTextField(
-                    value = row.name, onValueChange = { secrets[index] = row.copy(name = it); justSaved = false },
-                    label = { Text("名前") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = row.value, onValueChange = { secrets[index] = row.copy(value = it); justSaved = false },
-                    label = { Text("値") }, singleLine = true,
-                    visualTransformation = if (row.shown) VisualTransformation.None else PasswordVisualTransformation(),
+                    value = text, onValueChange = { editing = it; justSaved = false },
+                    label = { Text(".env") },
+                    placeholder = { Text("DISCORD_TOKEN=ここにトークン") },
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+                    minLines = 8,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    TextButton(onClick = { secrets[index] = row.copy(shown = !row.shown) }) {
-                        Text(if (row.shown) "🙈 隠す" else "👁 表示")
-                    }
-                    TextButton(onClick = { secrets.removeAt(index); justSaved = false }) {
-                        Text("🗑 削除", color = Red)
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        BotController.saveEnv(context, botId, text)
+                        saved = text
+                        editing = null
+                        justSaved = true
+                    }) { Text("保存") }
+                    OutlinedButton(onClick = { editing = null }) { Text("やめる") }
                 }
             }
+            saved == null -> {
+                Text("まだありません", color = Gray, fontSize = 13.sp)
+                OutlinedButton(onClick = { editing = ""; justSaved = false }) { Text("作る") }
+            }
+            else -> {
+                val names = DotEnv.names(saved.orEmpty())
+                if (names.isEmpty()) Text("値がまだ書かれていません", color = Gray, fontSize = 13.sp)
+                names.forEach { Text("$it ●●●●", fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
+                OutlinedButton(onClick = { editing = saved; justSaved = false }) { Text("表示して編集") }
+            }
         }
-        val duplicates = duplicateNames(secrets.map { it.name })
-        if (duplicates.isNotEmpty()) {
-            Text("同じ名前が2つ以上あります：${duplicates.joinToString(", ")}（下の行の値が使われます）", color = Red, fontSize = 12.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = {
-                secrets += SecretRow(if (secrets.none { it.name.trim() == "TOKEN" }) "TOKEN" else "", "")
-                justSaved = false
-            }) { Text("＋追加") }
-            Spacer(Modifier.width(4.dp))
-            Button(onClick = {
-                store.envVars = secrets.filter { it.name.isNotBlank() }.associate { it.name.trim() to it.value }
-                savedSecrets = store.envVars
-                justSaved = true
-            }) { Text("保存") }
-        }
-        val current = secrets.filter { it.name.isNotBlank() }.associate { it.name.trim() to it.value }
-        when {
-            current != savedSecrets -> Text("まだ保存していません（「保存」を押すと次の起動から使われます）", color = Red, fontSize = 12.sp)
-            justSaved -> Text("✓ 保存しました（次の起動から使われます）", color = Green, fontSize = 12.sp)
-            savedSecrets.isNotEmpty() -> Text("保存済み：${savedSecrets.keys.joinToString(", ")}", color = Gray, fontSize = 12.sp)
+        if (justSaved) Text("✓ 保存しました（次の起動から使われます）", color = Green, fontSize = 12.sp)
+        Help("env", prefs) {
+            Text(
+                "Bot のフォルダの .env に書いた値は、Bot の中で os.environ[\"名前\"] で読めます。" +
+                    ".env は共有フォルダにも置かれるので、PC で直しても構いません。",
+                fontSize = 12.sp, color = Color.DarkGray,
+            )
         }
     }
 }

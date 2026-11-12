@@ -136,6 +136,13 @@ object BotController {
 
     fun name(context: Context, id: String): String? = registry(context).get(id)?.name
 
+    /** Saves the bot's .env (from the settings tab) and copies it to the shared folder. */
+    fun saveEnv(context: Context, id: String, text: String) {
+        val app = context.applicationContext
+        EnvMigration.write(File(store(app, id).codeDir, DotEnv.FILE), text)
+        runCatching { sync(app, id)?.exportForced(listOf(DotEnv.FILE)) }
+    }
+
     /**
      * The values of the bot's .env, for its environment. [onNote] gets a line for the log for each line
      * that could not be read and each name left out (never a value).
