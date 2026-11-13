@@ -345,4 +345,34 @@ class FolderSyncTest {
         assertEquals("new", read(private, "a.py"))
         assertFalse(File(private, "b.py").exists())
     }
+
+    @Test fun aRenamedFolderMovesInTheSharedCopy() {
+        write(private, "bot/x.py", "x")
+        sync.export()
+        File(private, "bot").renameTo(File(private, "core"))
+        sync.export()
+        assertEquals("x", read(shared, "core/x.py"))
+        assertFalse(File(shared, "bot").exists())
+    }
+
+    @Test fun aFolderWithAnUnknownFileIsKept() {
+        write(private, "bot/x.py", "x")
+        sync.export()
+        write(shared, "bot/notes.txt", "mine")
+        File(private, "bot").renameTo(File(private, "core"))
+        sync.export()
+        assertEquals("mine", read(shared, "bot/notes.txt"))
+        assertFalse(File(shared, "bot/x.py").exists())
+    }
+
+    @Test fun pendingUnderFindsEditsInsideAFolder() {
+        write(private, "bot/x.py", "x")
+        write(private, "player/a.js", "a")
+        sync.export()
+        write(shared, "bot/x.py", "edited")
+        assertEquals(listOf("bot/x.py"), sync.pendingUnder(listOf("bot")))
+        assertEquals(listOf("bot/x.py"), sync.pendingUnder(listOf("bot/x.py")))
+        assertEquals(emptyList(), sync.pendingUnder(listOf("player")))
+        assertEquals(emptyList(), sync.pendingUnder(listOf("bo")))
+    }
 }

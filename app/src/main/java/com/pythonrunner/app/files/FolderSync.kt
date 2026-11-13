@@ -127,12 +127,22 @@ class FolderSync(
                     else -> Unit
                 }
             }
-            // The bot deleted a file: drop the shared copy if nobody edited it there.
+            // The bot deleted (or moved) a file: drop the shared copy if nobody edited it there.
+            val emptied = mutableSetOf<File>()
             for (path in manifest.keys.toList() - privateFiles.keys) {
                 val target = File(sharedDir, path)
                 if (target.isFile && hash(target) == manifest[path]) {
                     target.delete()
                     manifest.remove(path)
+                    target.parentFile?.let { emptied += it }
+                }
+            }
+            // Folders left with nothing in them go too (a moved or deleted folder); one holding anything stays.
+            for (start in emptied) {
+                var dir: File? = start
+                while (dir != null && dir != sharedDir && dir.path.startsWith(sharedDir.path) && dir.list()?.isEmpty() == true) {
+                    dir.delete()
+                    dir = dir.parentFile
                 }
             }
             writeManifest(manifest)
@@ -195,6 +205,14 @@ class FolderSync(
             }
             writeManifest(manifest)
         }
+    }
+
+    /** The shared-folder changes not brought in yet at or under any of [paths] (for the files screen's guard). */
+    fun pendingUnder(paths: Collection<String>): List<String> {
+        val changes = pendingImports()
+        return (changes.added + changes.modified + changes.removed)
+            .filter { changed -> paths.any { changed == it || changed.startsWith("$it/") } }
+            .sorted()
     }
 
     /** Where the shared folder stands, for the bot's card. Changes the person declined read as in sync. */
