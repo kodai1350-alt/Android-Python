@@ -59,6 +59,8 @@ fun FilesTab(
     onMainChanged: (String) -> Unit,
     onFilesChanged: () -> Unit,
     onImportStarted: () -> Unit,
+    /** A file was opened (tapped again): Notepad. */
+    onOpenFile: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -109,25 +111,18 @@ fun FilesTab(
     importNote?.let { Text(it, color = Green, fontSize = 13.sp) }
 
     Explorer(
-        root = store.codeDir.apply { mkdirs() },
+        botId = botId,
         rootLabel = name,
         path = path,
         onPathChange = { path = it },
         mainFile = mainFile,
         refreshKey = filesVersion to status,
+        enabled = !workBusy && BotController.importingBotId() != botId,
+        onOpenFile = onOpenFile,
         onSetMain = { p ->
             store.mainFile = p
             onMainChanged(p)
         },
-        onDelete = if (running || workBusy || BotController.importingBotId() == botId) null else { p ->
-            scope.launch {
-                val deleted = withContext(Dispatchers.IO) { store.deleteFile(p) }
-                onFilesChanged()
-                // The shared copy follows unless it was edited there.
-                if (deleted) withContext(Dispatchers.IO) { runCatching { BotController.sync(context, botId)?.export() } }
-            }
-        },
-        deleteBlockedMessage = "削除するには Bot を止めてください",
     )
     Text(
         "場所：${folderLabel(name)}（PC やファイルアプリからも同じ中身が見えます）",
@@ -135,8 +130,8 @@ fun FilesTab(
     )
     Help("files", prefs) {
         Text(
-            "ここに見えるファイルが Bot です。PC で直したフォルダは『フォルダを取り込む』か『Botをまるごと入れ替える』で入れます。" +
-                "ファイルやフォルダは長押しで削除できます。",
+            "PC のエクスプローラーと同じように使えます。タップで選び、もう一度タップで開きます。長押しは右クリックと同じメニューです。" +
+                "削除したものは「ごみ箱」から戻せます。PC で直したフォルダは『フォルダを取り込む』か『Botをまるごと入れ替える』で入れます。",
             fontSize = 12.sp, color = Color.DarkGray,
         )
     }

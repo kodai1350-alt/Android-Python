@@ -22,7 +22,13 @@ import com.pythonrunner.app.bot.KeyValue
 import com.pythonrunner.app.bot.NameCheck
 import com.pythonrunner.app.bot.SpikeMigration
 import com.pythonrunner.app.files.BotImporter
+import com.pythonrunner.app.files.BotSpace
 import com.pythonrunner.app.files.Clash
+import com.pythonrunner.app.files.FileOp
+import com.pythonrunner.app.files.FileOps
+import com.pythonrunner.app.files.Item
+import com.pythonrunner.app.files.TrashEntry
+import com.pythonrunner.app.files.UndoHistory
 import com.pythonrunner.app.files.FileNames
 import com.pythonrunner.app.files.Resolution
 import com.pythonrunner.app.files.Trash
@@ -126,6 +132,7 @@ object BotController {
     fun ensureReady(context: Context) {
         if (ready) return
         val app = context.applicationContext
+        appContext = app
         runCatching { SpikeMigration.run(app.filesDir, registry(app), prefs(app, "spike"), prefs(app, "bots")) }
         for (bot in registry(app).all()) {
             val s = store(app, bot.id)
@@ -923,11 +930,127 @@ object BotController {
 
     private class NotEnoughSpace(message: String) : Exception(message)
 
+    @Volatile private var appContext: Context? = null
+
     private fun requireSpace(needed: Long, dir: File) {
         val missing = BotImporter.missingBytes(needed, dir.usableSpace)
         if (missing > 0) {
             val mb = (missing + 1024 * 1024 - 1) / (1024 * 1024)
-            throw NotEnoughSpace("空き容量が足りません（あと ${mb}MB 必要です）")
+            // Like Windows: say how much emptying the recycle bins would free.
+            val inBins = appContext?.let { a -> registry(a).all().sumOf { runCatching { trash(a, it.id).size() }.getOrDefault(0) } } ?: 0
+            val hint = if (inBins >= 1024 * 1024) "（ごみ箱を空にすると ${inBins / (1024 * 1024)}MB 空きます）" else ""
+            throw NotEnoughSpace("空き容量が足りません（あと ${mb}MB 必要です）$hint")
+        }
+    }
+
+    // ---- The files screen: operations, clipboard, recycle bin, undo ----
+
+    /** What 切り取り or コピー put on the app-wide clipboard. */
+    data class Clip(val items: List<Item>, val cut: Boolean)
+
+    /** Paths with shared-folder changes not brought in yet: the operation waits for 反映する. */
+    class PendingChanges(val botId: String, val paths: List<String>) : Exception("未反映の変更があります")
+
+    val clipboard = MutableStateFlow<Clip?>(null)
+    private val _fileBusy = MutableStateFlow(false)
+    /** A file operation is running (its buttons wait). */
+    val fileBusy: StateFlow<Boolean> = _fileBusy
+    /** Bots whose files changed while they ran: the screen offers a restart. */
+    val filesChangedWhileRunning = MutableStateFlow<Set<String>>(emptySet())
+    private val histories = ConcurrentHashMap<String, UndoHistory>()
+
+    fun fileOps(context: Context): FileOps {
+        val app = context.applicationContext
+        return FileOps { id -> store(app, id).let { BotSpace(it.codeDir, Trash(it.trashDir)) } }
+    }
+
+    fun undoHistory(botId: String): UndoHistory = histories.getOrPut(botId) { UndoHistory() }
+
+    /** The shared-folder changes of [botId] not brought in yet, for 「先に反映する」. */
+    fun pendingChanges(context: Context, botId: String): SyncChanges? =
+        runCatching { sync(context, botId)?.pendingImports() }.getOrNull()?.takeIf { !it.isEmpty }
+
+    /**
+     * Runs a file operation off the main thread. First, if any [touched] item has shared-folder changes not
+     * brought in yet, it fails with [PendingChanges] and changes nothing. Afterwards: the op goes on
+     * [botId]'s undo list ([record]), 最初に実行 and the parts records follow moves, the shared copies
+     * follow, and a running bot is marked for the restart question. [onDone] runs on the main thread.
+     */
+    fun runFileOp(
+        context: Context,
+        botId: String,
+        touched: List<Item>,
+        record: Boolean = true,
+        op: () -> FileOp,
+        onDone: (Result<FileOp>) -> Unit,
+    ) {
+        val app = context.applicationContext
+        _fileBusy.value = true
+        scope.launch {
+            val result = runCatching {
+                touched.groupBy { it.botId }.forEach { (bot, items) ->
+                    val pending = sync(app, bot)?.pendingUnder(items.map { it.path }).orEmpty()
+                    if (pending.isNotEmpty()) throw PendingChanges(bot, pending)
+                }
+                op().also { done -> afterFileOp(app, botId, done, record) }
+            }
+            _fileBusy.value = false
+            ContextCompat.getMainExecutor(app).execute { onDone(result) }
+        }
+    }
+
+    /** 元に戻す: reverses the newest op of [botId]; it leaves the list only once it is undone. */
+    fun undoLast(context: Context, botId: String, onDone: (Result<FileOp>) -> Unit) {
+        val history = undoHistory(botId)
+        val op = history.peek() ?: return
+        val ops = fileOps(context)
+        runFileOp(context, botId, itemsOf(op), record = false, op = {
+            ops.undo(op)
+            history.pop()
+            op
+        }, onDone = onDone)
+    }
+
+    /** 完全に削除 / ごみ箱を空にする ([entries] null): cannot be undone. */
+    fun deleteFromTrash(context: Context, botId: String, entries: List<TrashEntry>?, onDone: () -> Unit) {
+        val app = context.applicationContext
+        scope.launch {
+            val bin = trash(app, botId)
+            runCatching { if (entries == null) bin.empty() else entries.forEach { bin.delete(it) } }
+            ContextCompat.getMainExecutor(app).execute { onDone() }
+        }
+    }
+
+    private fun itemsOf(op: FileOp): List<Item> = when (op) {
+        is FileOp.Trashed -> op.entries.map { Item(op.botId, it.originalPath) }
+        is FileOp.Moved -> op.moves.flatMap { listOf(it.from, it.to) }
+        is FileOp.Copied -> op.created.map { Item(op.botId, it) }
+        is FileOp.Created -> listOf(Item(op.botId, op.path))
+        is FileOp.Restored -> op.paths.map { Item(op.botId, it) }
+    }
+
+    private fun afterFileOp(app: Context, botId: String, op: FileOp, record: Boolean) {
+        if (record) undoHistory(botId).push(op)
+        val bots = (itemsOf(op).map { it.botId } + botId).toSet()
+        if (op is FileOp.Moved) {
+            val ops = fileOps(app)
+            for (bot in bots) {
+                val s = store(app, bot)
+                s.mainFile?.let { main ->
+                    ops.remap(Item(bot, main), op.moves)?.let { s.mainFile = if (it.botId == bot) it.path else null }
+                }
+                s.partsInstalled = s.partsInstalled.mapNotNull { (key, at) ->
+                    if (key == ".") return@mapNotNull key to at
+                    val moved = ops.remap(Item(bot, key), op.moves) ?: return@mapNotNull key to at
+                    if (moved.botId == bot) moved.path to at else null
+                }.toMap()
+            }
+        }
+        for (bot in bots) {
+            store(app, bot).forgetMissingMain()
+            runCatching { sync(app, bot)?.export() }
+            recheck(bot)
+            if (isRunning(bot)) filesChangedWhileRunning.value = filesChangedWhileRunning.value + bot
         }
     }
 

@@ -72,6 +72,18 @@ fun BotDetailScreen(
     var packages by rememberSaveable(botId) { mutableStateOf("pip install discord.py") }
     var importNote by remember(botId) { mutableStateOf<String?>(null) }
     var askRestart by remember(botId) { mutableStateOf(false) }
+    // Files changed by the files screen under a running bot: ask once whether to restart it.
+    val changedWhileRunning by BotController.filesChangedWhileRunning.collectAsStateWithLifecycle()
+    var askedRestartThisVisit by remember(botId) { mutableStateOf(false) }
+    LaunchedEffect(botId in changedWhileRunning) {
+        if (botId in changedWhileRunning) {
+            BotController.filesChangedWhileRunning.value = BotController.filesChangedWhileRunning.value - botId
+            if (!askedRestartThisVisit) {
+                askedRestartThisVisit = true
+                askRestart = true
+            }
+        }
+    }
     val importingHere = BotController.importingBotId() == botId
 
     LaunchedEffect(importResult) {
