@@ -58,6 +58,9 @@ fun NotepadScreen(botId: String, path: String, running: Boolean, onClose: () -> 
     var saved by remember(path) { mutableStateOf("") }
     var askSave by remember { mutableStateOf(false) }
     var justSaved by remember { mutableStateOf(false) }
+    // A save that needs an answer first: the file changed since it was opened, or the charset cannot hold the text.
+    var askOverwrite by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var askUtf8 by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     LaunchedEffect(path) {
         val file = File(BotController.store(context, botId).codeDir, path)
@@ -79,17 +82,24 @@ fun NotepadScreen(botId: String, path: String, running: Boolean, onClose: () -> 
     val text = opened as? Opened.Text
     val changed = text != null && value.text != saved
 
-    fun save(then: () -> Unit = {}) {
-        val like = text ?: return
+    fun save(force: Boolean = false, charset: String? = null, then: () -> Unit = {}) {
+        val like = (text ?: return).let { if (charset != null) it.copy(charset = charset) else it }
         val now = value.text
         scope.launch {
-            val ok = withContext(Dispatchers.IO) { runCatching { BotController.saveText(context, botId, path, now, like) }.isSuccess }
-            if (ok) {
+            val result = withContext(Dispatchers.IO) { runCatching { BotController.saveText(context, botId, path, now, like, force) } }
+            result.onSuccess { modified ->
+                // The next save compares against this save, not the original opening.
+                opened = like.copy(text = now, modified = modified)
                 saved = now
                 justSaved = true
                 then()
-            } else {
-                Toast.makeText(context, "保存できませんでした", Toast.LENGTH_LONG).show()
+            }.onFailure { e ->
+                when (e) {
+                    is TextFiles.ChangedSinceOpened -> askOverwrite = { save(force = true, charset = charset, then = then) }
+                    is TextFiles.CannotEncode -> askUtf8 = { save(force = force, charset = "UTF-8", then = then) }
+                    is BotController.PendingChanges -> pending = e.paths
+                    else -> Toast.makeText(context, "保存できませんでした", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -156,6 +166,24 @@ fun NotepadScreen(botId: String, path: String, running: Boolean, onClose: () -> 
                     OutlinedButton(onClick = { askSave = false }) { Text("キャンセル") }
                 }
             },
+        )
+    }
+    askOverwrite?.let { go ->
+        AlertDialog(
+            onDismissRequest = { askOverwrite = null },
+            title = { Text("メモ帳") },
+            text = { Text("$name は、開いたあとに変更されています（PC や Bot が書き換えた可能性があります）。上書きしますか？") },
+            confirmButton = { TextButton(onClick = { askOverwrite = null; go() }) { Text("上書きする") } },
+            dismissButton = { TextButton(onClick = { askOverwrite = null }) { Text("やめる") } },
+        )
+    }
+    askUtf8?.let { go ->
+        AlertDialog(
+            onDismissRequest = { askUtf8 = null },
+            title = { Text("メモ帳") },
+            text = { Text("${text?.charset} では保存できない文字（絵文字など）があります。UTF-8 で保存しますか？") },
+            confirmButton = { TextButton(onClick = { askUtf8 = null; go() }) { Text("UTF-8 で保存") } },
+            dismissButton = { TextButton(onClick = { askUtf8 = null }) { Text("やめる") } },
         )
     }
     pending?.let { paths ->

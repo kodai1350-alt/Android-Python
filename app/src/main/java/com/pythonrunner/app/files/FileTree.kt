@@ -14,6 +14,7 @@ data class FileEntry(
     val modifiedMillis: Long,
     /** Visible children of a folder; 0 for files. */
     val childCount: Int,
+    val isLink: Boolean = false,
 )
 
 /** Lists a bot folder for the file view: folders first, then files, Python caches hidden. */
@@ -25,10 +26,12 @@ object FileTree {
                 FileEntry(
                     name = f.name,
                     relativePath = f.relativeTo(root).invariantSeparatorsPath,
-                    isDirectory = f.isDirectory,
+                    // A link to a folder is not entered: it is listed as a link (a file), never opened.
+                    isDirectory = isRealDirectory(f),
+                    isLink = Files.isSymbolicLink(f.toPath()),
                     sizeBytes = if (f.isDirectory) 0 else f.length(),
                     modifiedMillis = f.lastModified(),
-                    childCount = if (f.isDirectory) visibleChildren(f).size else 0,
+                    childCount = if (isRealDirectory(f)) visibleChildren(f).size else 0,
                 )
             }
 
@@ -50,7 +53,8 @@ object FileTree {
     fun icon(name: String, isDirectory: Boolean): String = if (isDirectory) "📁" else "📄"
 
     /** The "種類" column, like the Type column of a PC file explorer. */
-    fun kind(name: String, isDirectory: Boolean): String {
+    fun kind(name: String, isDirectory: Boolean, isLink: Boolean = false): String {
+        if (isLink) return "リンク"
         if (isDirectory) return "フォルダ"
         val lower = name.lowercase(Locale.ROOT)
         val ext = lower.substringAfterLast('.', "")

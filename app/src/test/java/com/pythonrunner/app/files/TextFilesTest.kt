@@ -52,4 +52,31 @@ class TextFilesTest {
         assertEquals(2 to 2, TextFiles.position("ab\ncd", 4))
         assertEquals(1 to 1, TextFiles.position("", 0))
     }
+
+    @Test fun aShiftJisSaveRefusesCharactersItCannotHold() {
+        val f = File(root, "s2.txt").apply { writeBytes("あ".toByteArray(sjis)) }
+        val opened = assertIs<Opened.Text>(TextFiles.open(f))
+        kotlin.test.assertFailsWith<TextFiles.CannotEncode> { TextFiles.save(f, "あ😀", opened) }
+        assertEquals("あ".toByteArray(sjis).toList(), f.readBytes().toList())
+        TextFiles.save(f, "あ😀", opened.copy(charset = "UTF-8"))
+        assertEquals("あ😀", f.readText())
+    }
+
+    @Test fun aSaveOverAFileChangedSinceItWasOpenedIsRefused() {
+        val f = File(root, "c.txt").apply { writeText("a") }
+        val opened = assertIs<Opened.Text>(TextFiles.open(f))
+        f.writeText("changed elsewhere")
+        f.setLastModified(opened.modified + 5000)
+        kotlin.test.assertFailsWith<TextFiles.ChangedSinceOpened> { TextFiles.save(f, "mine", opened) }
+        assertEquals("changed elsewhere", f.readText())
+        TextFiles.save(f, "mine", opened, force = true)
+        assertEquals("mine", f.readText())
+    }
+
+    @Test fun aLinkIsNotOpened() {
+        val target = File(root, "t.txt").apply { writeText("x") }
+        val link = File(root, "l.txt")
+        if (runCatching { Files.createSymbolicLink(link.toPath(), target.toPath()) }.isFailure) return
+        assertIs<Opened.NotText>(TextFiles.open(link))
+    }
 }

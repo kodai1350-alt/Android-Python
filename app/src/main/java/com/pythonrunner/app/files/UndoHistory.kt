@@ -16,5 +16,12 @@ class UndoHistory(private val max: Int = 20) {
     @Synchronized
     fun peek(): FileOp? = ops.lastOrNull()
 
+    /** Drops [op] wherever it is (the one an undo just reversed). */
+    @Synchronized
+    fun remove(op: FileOp): Boolean = ops.remove(op)
+
+    @Synchronized
+    fun contains(op: FileOp): Boolean = op in ops
+
     val size: Int @Synchronized get() = ops.size
 }

@@ -30,7 +30,15 @@ object TextFiles {
     private const val SJIS = "Shift_JIS"
     private val BOM = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
 
+    /** The text has characters the file's charset cannot hold (an emoji in Shift_JIS). */
+    class CannotEncode(val charset: String) : IOException("$charset では保存できない文字があります")
+
+    /** The file changed after Notepad read it (on a PC, by the bot). */
+    class ChangedSinceOpened : IOException("開いたあとにファイルが変更されています")
+
     fun open(file: File): Opened {
+        // A link is never opened: a save would write through it, outside the bot.
+        if (java.nio.file.Files.isSymbolicLink(file.toPath())) return Opened.NotText("リンク", 0)
         val size = file.length()
         if (size > MAX_BYTES) return Opened.TooBig(size)
         val bytes = file.readBytes()
@@ -46,10 +54,17 @@ object TextFiles {
     }
 
     /** Writes [text] the way [like] was read, to a temporary file first, then renames it into place. */
-    fun save(file: File, text: String, like: Opened.Text) {
+    fun save(file: File, text: String, like: Opened.Text, force: Boolean = false) {
+        if (!force && file.exists() && file.lastModified() != like.modified) throw ChangedSinceOpened()
         val charset = if (like.charset == SJIS) BotImporter.shiftJis() else Charsets.UTF_8
         val lines = if (like.crlf) text.replace("\r\n", "\n").replace("\n", "\r\n") else text
-        val bytes = (if (like.bom) BOM else ByteArray(0)) + lines.toByteArray(charset)
+        val encoded = try {
+            charset.newEncoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
+                .encode(java.nio.CharBuffer.wrap(lines)).let { buf -> ByteArray(buf.remaining()).also { buf.get(it) } }
+        } catch (e: CharacterCodingException) {
+            throw CannotEncode(like.charset)
+        }
+        val bytes = (if (like.bom) BOM else ByteArray(0)) + encoded
         val tmp = File(file.parentFile, ".${file.name}.saving")
         tmp.writeBytes(bytes)
         if (!tmp.renameTo(file)) {

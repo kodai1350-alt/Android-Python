@@ -96,4 +96,25 @@ class UndoTest {
         assertFailsWith<IllegalStateException> { ops.undo(op) }
         assertEquals("2", File(code("a"), "x.py").readText())
     }
+
+    @Test fun undoOfADeleteWhoseBinEntryWasDeletedStops() {
+        write("a", "x.py", "1")
+        write("a", "y.py", "2")
+        val op = ops.trash("a", listOf("x.py", "y.py"))
+        val bin = spaces.getValue("a").trash
+        bin.delete(bin.entries().first { it.originalPath == "y.py" })
+        assertFailsWith<IllegalStateException> { ops.undo(op) }
+        assertEquals(emptyList(), tree("a"))
+    }
+
+    @Test fun historyCanDropASpecificOp() {
+        val history = UndoHistory()
+        val a = FileOp.Created("a", "a", emptyList())
+        val b = FileOp.Created("a", "b", emptyList())
+        history.push(a)
+        history.push(b)
+        assertTrue(history.remove(a))
+        assertEquals(b, history.pop())
+        assertEquals(null, history.pop())
+    }
 }

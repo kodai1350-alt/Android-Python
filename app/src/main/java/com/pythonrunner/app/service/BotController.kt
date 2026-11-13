@@ -27,6 +27,9 @@ import com.pythonrunner.app.files.Clash
 import com.pythonrunner.app.files.FileOp
 import com.pythonrunner.app.files.FileOps
 import com.pythonrunner.app.files.Item
+import com.pythonrunner.app.files.Move
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.pythonrunner.app.files.TrashEntry
 import com.pythonrunner.app.files.UndoHistory
 import com.pythonrunner.app.files.FileNames
@@ -157,19 +160,44 @@ object BotController {
 
     fun name(context: Context, id: String): String? = registry(context).get(id)?.name
 
-    /** Notepad's 保存: writes [path] as [like] was read, then copies it to the shared folder. */
-    fun saveText(context: Context, botId: String, path: String, text: String, like: com.pythonrunner.app.files.Opened.Text) {
+    /**
+     * Notepad's 保存: writes [path] as [like] was read and returns the file's new time. Refuses with
+     * [PendingChanges] when the shared copy was changed and not brought in, and with
+     * TextFiles.ChangedSinceOpened when the file changed after it was opened (unless [force]); the shared
+     * copy follows only where nobody edited it.
+     */
+    fun saveText(
+        context: Context,
+        botId: String,
+        path: String,
+        text: String,
+        like: com.pythonrunner.app.files.Opened.Text,
+        force: Boolean = false,
+    ): Long {
         val app = context.applicationContext
-        com.pythonrunner.app.files.TextFiles.save(File(store(app, botId).codeDir, path), text, like)
-        runCatching { sync(app, botId)?.exportForced(listOf(path)) }
+        val sync = sync(app, botId)
+        val pending = runCatching { sync?.pendingUnder(listOf(path)) }.getOrNull().orEmpty()
+        if (pending.isNotEmpty()) throw PendingChanges(botId, pending)
+        val file = File(store(app, botId).codeDir, path)
+        com.pythonrunner.app.files.TextFiles.save(file, text, like, force)
+        runCatching { sync?.export() }
         recheck(botId)
+        return file.lastModified()
     }
 
-    /** Saves the bot's .env (from the settings tab) and copies it to the shared folder. */
+    /**
+     * 作る in the settings tab: an empty .env. Refuses with [PendingChanges] when the shared folder has a
+     * .env not brought in yet (its token must not be wiped), and never replaces an existing one.
+     */
     fun saveEnv(context: Context, id: String, text: String) {
         val app = context.applicationContext
-        EnvMigration.write(File(store(app, id).codeDir, DotEnv.FILE), text)
-        runCatching { sync(app, id)?.exportForced(listOf(DotEnv.FILE)) }
+        val sync = sync(app, id)
+        val pending = runCatching { sync?.pendingUnder(listOf(DotEnv.FILE)) }.getOrNull().orEmpty()
+        if (pending.isNotEmpty()) throw PendingChanges(id, pending)
+        val file = File(store(app, id).codeDir, DotEnv.FILE)
+        if (file.exists()) return
+        EnvMigration.write(file, text)
+        runCatching { sync?.export() }
     }
 
     /**
@@ -995,29 +1023,42 @@ object BotController {
         val app = context.applicationContext
         _fileBusy.value = true
         scope.launch {
-            val result = runCatching {
-                touched.groupBy { it.botId }.forEach { (bot, items) ->
-                    val pending = sync(app, bot)?.pendingUnder(items.map { it.path }).orEmpty()
-                    if (pending.isNotEmpty()) throw PendingChanges(bot, pending)
+            // One file operation at a time: an undo never races the operation it reverses.
+            val result = fileMutex.withLock {
+                runCatching {
+                    touched.groupBy { it.botId }.forEach { (bot, items) ->
+                        val pending = sync(app, bot)?.pendingUnder(items.map { it.path }).orEmpty()
+                        if (pending.isNotEmpty()) throw PendingChanges(bot, pending)
+                    }
+                    op().also { done -> afterFileOp(app, botId, done, record) }
                 }
-                op().also { done -> afterFileOp(app, botId, done, record) }
             }
-            _fileBusy.value = false
+            _fileBusy.value = fileMutex.isLocked
             ContextCompat.getMainExecutor(app).execute { onDone(result) }
         }
     }
 
-    /** 元に戻す: reverses the newest op of [botId]; it leaves the list only once it is undone. */
+    /** 元に戻す: reverses the newest op of [botId]. */
     fun undoLast(context: Context, botId: String, onDone: (Result<FileOp>) -> Unit) {
+        undoHistory(botId).peek()?.let { undo(context, botId, it, onDone) }
+    }
+
+    /**
+     * Reverses exactly [op] (the snackbar's 元に戻す names the delete it reports); it leaves the list only
+     * once undone. For a move, 最初に実行 and the parts records follow the files back.
+     */
+    fun undo(context: Context, botId: String, op: FileOp, onDone: (Result<FileOp>) -> Unit) {
         val history = undoHistory(botId)
-        val op = history.peek() ?: return
         val ops = fileOps(context)
         runFileOp(context, botId, itemsOf(op), record = false, op = {
+            if (!history.contains(op)) throw IllegalStateException("もう元に戻してあります")
             ops.undo(op)
-            history.pop()
-            op
+            history.remove(op)
+            if (op is FileOp.Moved) op.copy(moves = op.moves.map { Move(it.to, it.from) }.reversed()) else op
         }, onDone = onDone)
     }
+
+    private val fileMutex = Mutex()
 
     /** 完全に削除 / ごみ箱を空にする ([entries] null): cannot be undone. */
     fun deleteFromTrash(context: Context, botId: String, entries: List<TrashEntry>?, onDone: () -> Unit) {

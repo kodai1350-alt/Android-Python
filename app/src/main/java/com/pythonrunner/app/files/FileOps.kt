@@ -88,7 +88,7 @@ class FileOps(private val space: (String) -> BotSpace) {
                 entries += bin.put(file, path)
             }
         } catch (e: Exception) {
-            runCatching { undo(FileOp.Trashed(botId, entries)) }
+            runCatching { undo(FileOp.Trashed(botId, entries), check = false) }
             throw e
         }
         return FileOp.Trashed(botId, entries)
@@ -127,24 +127,33 @@ class FileOps(private val space: (String) -> BotSpace) {
         return FileOp.Created(botId, path, listOf(stamp(botId, path)))
     }
 
-    /** The files a paste would put over others (folders with the same name are merged, so only files clash). */
-    fun clashes(sources: List<Item>, toBot: String, toDir: String): List<Clash> {
+    /**
+     * The files a paste would put over others (folders with the same name are merged, so only files clash).
+     * The walk follows the paste's own rules: a copy leaves out installed parts and links, a cut does not.
+     * A file meeting a folder of the same name is refused, as in Windows.
+     */
+    fun clashes(sources: List<Item>, toBot: String, toDir: String, cut: Boolean = false): List<Clash> {
         val result = mutableListOf<Clash>()
         val destDir = file(toBot, toDir)
         for (source in sources) {
             val from = file(source.botId, source.path)
             if (!exists(from)) continue
             if (source.botId == toBot && parentOf(source.path) == toDir) continue // a copy name, or nothing to do
-            collectClashes(from, destDir, toBot, toDir, result)
+            collectClashes(from, destDir, toBot, toDir, cut, result)
         }
         return result.sortedBy { it.path }
     }
 
-    private fun collectClashes(from: File, destDir: File, toBot: String, destPath: String, into: MutableList<Clash>) {
+    private fun collectClashes(from: File, destDir: File, toBot: String, destPath: String, cut: Boolean, into: MutableList<Clash>) {
         val existing = findSame(destDir, from.name) ?: return
         val path = join(destPath, existing.name)
-        if (FileTree.isRealDirectory(from) && FileTree.isRealDirectory(existing)) {
-            from.listFiles().orEmpty().filter { !skipWhenCopying(it) }.forEach { collectClashes(it, existing, toBot, path, into) }
+        val fromDir = FileTree.isRealDirectory(from)
+        val existingDir = FileTree.isRealDirectory(existing)
+        if (fromDir != existingDir) {
+            throw IllegalArgumentException("「${existing.name}」という名前の${if (existingDir) "フォルダー" else "ファイル"}がすでにあります")
+        }
+        if (fromDir) {
+            from.listFiles().orEmpty().filter { cut || !skipWhenCopying(it) }.forEach { collectClashes(it, existing, toBot, path, cut, into) }
         } else {
             into += Clash(path, FileTree.sizeOf(existing), existing.lastModified(), FileTree.sizeOf(from), from.lastModified())
         }
@@ -169,6 +178,8 @@ class FileOps(private val space: (String) -> BotSpace) {
                 throw IllegalArgumentException(SUBFOLDER)
             }
         }
+        // A file meeting a folder of the same name stops the paste before anything changes.
+        clashes(sources, toBot, toDir, cut)
         val run = PasteRun(cut, toBot, resolution, cancelled)
         try {
             sources.forEachIndexed { i, source ->
@@ -177,7 +188,7 @@ class FileOps(private val space: (String) -> BotSpace) {
                 onProgress(i + 1, sources.size)
             }
         } catch (e: Exception) {
-            runCatching { undo(run.result()) }
+            runCatching { undo(run.result(), check = false) }
             throw e
         }
         return run.result()
@@ -254,7 +265,8 @@ class FileOps(private val space: (String) -> BotSpace) {
                 moves += Move(source, Item(toBot, destPath))
             } else {
                 FileTree.copyTree(from, to, skip = ::skipWhenCopying)
-                created += destPath
+                // A link copies to nothing: only what was really made is recorded (and can be undone).
+                if (exists(to)) created += destPath
             }
         }
     }
@@ -303,9 +315,12 @@ class FileOps(private val space: (String) -> BotSpace) {
         return null
     }
 
-    /** Reverses [op]. Throws (before changing anything) when what it left behind has changed since. */
-    fun undo(op: FileOp) {
-        for (s in op.stamps) {
+    /**
+     * Reverses [op]. Throws (before changing anything) when what it left behind has changed since, or what
+     * it put in the bin is gone. [check] off: the rollback of an operation that just failed midway.
+     */
+    fun undo(op: FileOp, check: Boolean = true) {
+        for (s in if (check) op.stamps else emptyList()) {
             val f = file(s.botId, s.path)
             val same = exists(f) && (s.size < 0 && FileTree.isRealDirectory(f) || s.size >= 0 && f.length() == s.size && f.lastModified() == s.modified)
             if (!same) throw IllegalStateException(CHANGED)
@@ -314,6 +329,8 @@ class FileOps(private val space: (String) -> BotSpace) {
             is FileOp.Trashed -> {
                 val bin = space(op.botId).trash
                 if (op.entries.any { exists(file(op.botId, it.originalPath)) }) throw IllegalStateException(CHANGED)
+                val held = bin.entries().map { it.id }.toSet()
+                if (op.entries.any { it.id !in held }) throw IllegalStateException(CHANGED)
                 op.entries.reversed().forEach { bin.take(it, file(op.botId, it.originalPath)) }
             }
             is FileOp.Moved -> {

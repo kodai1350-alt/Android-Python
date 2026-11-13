@@ -100,4 +100,13 @@ class FileTreeTest {
         if (runCatching { Files.createSymbolicLink(File(root, "src/link").toPath(), outside.toPath()) }.isFailure) return
         assertEquals(2, FileTree.fileCount(File(root, "src")))
     }
+
+    @Test fun aLinkToAFolderIsListedAsALinkNotAFolder() {
+        val outside = Files.createTempDirectory("out2").toFile()
+        file("a.py")
+        if (runCatching { Files.createSymbolicLink(File(root, "linked").toPath(), outside.toPath()) }.isFailure) return
+        val entry = FileTree.list(root, root).first { it.name == "linked" }
+        assertEquals(false, entry.isDirectory)
+        assertEquals("リンク", FileTree.kind("linked", isDirectory = false, isLink = true))
+    }
 }

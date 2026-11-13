@@ -160,13 +160,14 @@ fun Explorer(
         val paths = selection.toList().filter { !isPart(it) }
         if (paths.isEmpty() || !canChange) return
         BotController.runFileOp(context, botId, paths.map { Item(botId, it) }, op = { ops.trash(botId, paths) }) { r ->
-            finish(r) {
+            finish(r) { done ->
                 selection.clear()
                 scope.launch {
                     val answer = snackbar.showSnackbar(
                         "${paths.size} 個の項目をごみ箱に移動しました", actionLabel = "元に戻す", duration = SnackbarDuration.Short,
                     )
-                    if (answer == SnackbarResult.ActionPerformed) BotController.undoLast(context, botId) { finish(it) }
+                    // Undoes exactly this delete, even if another operation came after it.
+                    if (answer == SnackbarResult.ActionPerformed) BotController.undo(context, botId, done) { finish(it) }
                 }
             }
         }
@@ -196,7 +197,7 @@ fun Explorer(
         val c = clip ?: return
         if (!canChange) return
         scope.launch {
-            val clashes = withContext(Dispatchers.IO) { runCatching { ops.clashes(c.items, botId, folder) }.getOrDefault(emptyList()) }
+            val clashes = withContext(Dispatchers.IO) { runCatching { ops.clashes(c.items, botId, folder, c.cut) }.getOrDefault(emptyList()) }
             if (clashes.isEmpty()) doPaste(Resolution.ReplaceAll) else pasteClashes = clashes
         }
     }

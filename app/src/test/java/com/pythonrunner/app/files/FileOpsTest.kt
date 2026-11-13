@@ -168,4 +168,32 @@ class FileOpsTest {
         assertNull(ops.remap(Item("a", "other.py"), op.moves))
         assertNull(ops.remap(Item("a", "botany.py"), op.moves))
     }
+
+    @Test fun aFileOverAFolderOfTheSameNameIsRefused() {
+        write("a", "data", "a file")
+        write("b", "data/keep.txt", "k")
+        val before = tree("b")
+        assertFailsWith<IllegalArgumentException> { ops.clashes(listOf(Item("a", "data")), "b", "") }
+        assertFailsWith<IllegalArgumentException> {
+            ops.paste(listOf(Item("a", "data")), cut = false, toBot = "b", toDir = "", resolution = Resolution.ReplaceAll)
+        }
+        assertEquals(before, tree("b"))
+    }
+
+    @Test fun aCutFindsClashesInsideInstalledPartsToo() {
+        write("a", "x/node_modules/m/i.js", "new")
+        write("b", "x/node_modules/m/i.js", "old")
+        assertEquals(listOf("x/node_modules/m/i.js"), ops.clashes(listOf(Item("a", "x")), "b", "", cut = true).map { it.path })
+        assertEquals(emptyList(), ops.clashes(listOf(Item("a", "x")), "b", "", cut = false))
+    }
+
+    @Test fun aCopyWithALinkCanStillBeUndone() {
+        write("a", "real.py", "r")
+        val outside = File(root, "outside2").apply { mkdirs() }
+        if (runCatching { Files.createSymbolicLink(File(code("a"), "linked").toPath(), outside.toPath()) }.isFailure) return
+        val op = ops.paste(listOf(Item("a", "linked"), Item("a", "real.py")), cut = false, toBot = "b", toDir = "", resolution = Resolution.ReplaceAll)
+        assertEquals(listOf("real.py"), (op as FileOp.Copied).created)
+        ops.undo(op)
+        assertEquals(emptyList(), tree("b"))
+    }
 }

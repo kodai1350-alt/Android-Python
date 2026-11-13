@@ -133,8 +133,15 @@ private fun EnvSection(botId: String, filesVersion: Int, onOpenFile: (String) ->
             Text("まだありません", color = Gray, fontSize = 13.sp)
             OutlinedButton(onClick = {
                 scope.launch {
-                    val ok = withContext(Dispatchers.IO) { runCatching { BotController.saveEnv(context, botId, "") }.isSuccess }
-                    if (ok) onOpenFile(DotEnv.FILE) else Toast.makeText(context, ".env を作れませんでした", Toast.LENGTH_LONG).show()
+                    val result = withContext(Dispatchers.IO) { runCatching { BotController.saveEnv(context, botId, "") } }
+                    result.onSuccess { onOpenFile(DotEnv.FILE) }.onFailure { e ->
+                        val message = if (e is BotController.PendingChanges) {
+                            "共有フォルダの .env がまだ反映されていません。先に「✏ 変更あり」から反映してください"
+                        } else {
+                            ".env を作れませんでした"
+                        }
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
                 }
             }) { Text("作る") }
         } else {
