@@ -155,7 +155,9 @@ fun rememberBotActions(): BotActions {
                     // Files changed again after confirming are not imported: ask again instead of going on.
                     val again = withContext(Dispatchers.IO) {
                         val sync = BotController.sync(context, id)
-                        val skipped = sync?.importChanges(changes).orEmpty()
+                        // What the shared changes replace or delete goes to the bin, so it can come back.
+                        val bin = BotController.trash(context, id)
+                        val skipped = sync?.importChanges(changes) { f, p -> bin.put(f, p) }.orEmpty()
                         BotController.store(context, id).forgetMissingMain()  // the file to run first may be gone
                         BotController.declinedChanges.remove(id)
                         BotController.recheck(id)

@@ -30,6 +30,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
 import com.pythonrunner.app.files.ImportPlan
+import com.pythonrunner.app.files.Resolution
 import com.pythonrunner.app.service.ImportState
 
 /** The one way in: 📥 取り込む, then a file (.py, ZIP, anything) or a whole folder. */
@@ -52,7 +53,7 @@ fun ImportButton(enabled: Boolean, onPickFile: () -> Unit, onPickFolder: () -> U
 @Composable
 fun ImportStateView(
     state: ImportState,
-    onConfirm: (removeExtras: Boolean) -> Unit,
+    onConfirm: (resolution: Resolution, removeExtras: Boolean) -> Unit,
     onCancel: () -> Unit,
     onClose: () -> Unit,
     onName: (String) -> Unit = {},
@@ -62,7 +63,11 @@ fun ImportStateView(
             Text("取り込み中 ${state.percent}%", fontSize = 13.sp)
             LinearProgressIndicator(progress = { state.percent / 100f }, modifier = Modifier.fillMaxWidth())
         }
-        is ImportState.Confirm -> ImportCheckDialog(state.plan, onConfirm, onCancel)
+        is ImportState.Confirm -> if (state.wholeBot) {
+            ImportCheckDialog(state.plan, { removeExtras -> onConfirm(Resolution.ReplaceAll, removeExtras) }, onCancel)
+        } else {
+            ReplaceOrSkipDialog(state.clashes, state.folderLabel, onDone = { onConfirm(it, false) }, onCancel = onCancel)
+        }
         is ImportState.Failed -> Column {
             Text(state.message, color = Color(0xFFE03131), fontSize = 13.sp)
             TextButton(onClick = onClose) { Text("閉じる") }
@@ -86,8 +91,7 @@ private fun ImportCheckDialog(plan: ImportPlan, onConfirm: (removeExtras: Boolea
         text = {
             Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (plan.overwrites.isNotEmpty()) {
-                    Text("置き換わるもの（${plan.overwrites.size} 個）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    plan.overwrites.forEach { Text("・$it", fontSize = 13.sp) }
+                    Text("置き換わるもの：${plan.overwrites.size} 個（古い方はごみ箱へ）", fontSize = 13.sp)
                 }
                 if (added > 0) Text("増えるもの：${added} 個", fontSize = 13.sp)
                 if (plan.extras.isNotEmpty()) {
@@ -101,7 +105,7 @@ private fun ImportCheckDialog(plan: ImportPlan, onConfirm: (removeExtras: Boolea
                     Text("このファイルをどうしますか？", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     listOf(
                         Triple(false, "残す（おすすめ）", "新しいファイルを入れて、このファイルもそのまま使います。"),
-                        Triple(true, "削除する", "新しいフォルダと同じ中身にします。このファイルは消えて、元に戻せません。"),
+                        Triple(true, "削除する", "新しいフォルダと同じ中身にします。このファイルはごみ箱に入ります（ファイル画面のごみ箱から戻せます）。"),
                     ).forEach { (value, label, note) ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,

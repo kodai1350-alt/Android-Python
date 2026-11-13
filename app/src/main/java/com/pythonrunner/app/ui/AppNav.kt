@@ -121,7 +121,7 @@ fun AppNav() {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             ImportStateView(
                 importState,
-                onConfirm = { removeExtras -> BotController.confirmImport(context, removeExtras) },
+                onConfirm = { resolution, removeExtras -> BotController.confirmImport(context, resolution, removeExtras) },
                 onCancel = { BotController.cancelImport(context) },
                 onClose = { BotController.finishImport() },
                 onName = { BotController.confirmName(context, it) },

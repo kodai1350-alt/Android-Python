@@ -22,6 +22,10 @@ import com.pythonrunner.app.bot.KeyValue
 import com.pythonrunner.app.bot.NameCheck
 import com.pythonrunner.app.bot.SpikeMigration
 import com.pythonrunner.app.files.BotImporter
+import com.pythonrunner.app.files.Clash
+import com.pythonrunner.app.files.FileNames
+import com.pythonrunner.app.files.Resolution
+import com.pythonrunner.app.files.Trash
 import com.pythonrunner.app.files.FolderSync
 import com.pythonrunner.app.files.ImportPlan
 import com.pythonrunner.app.files.LeftoverFiles
@@ -54,7 +58,17 @@ sealed interface ImportState {
     data object Idle : ImportState
     data class Working(val percent: Int) : ImportState
     /** Some existing files would be replaced: waiting for 上書きして取り込む. */
-    data class Confirm(val plan: ImportPlan) : ImportState
+    /**
+     * The import needs an answer first. [wholeBot]: 「Botをまるごと入れ替える」 (same names are replaced, the
+     * files the new ones lack are asked about); otherwise the taken names ([clashes]) get 「ファイルの置換または
+     * スキップ」 for the folder [folderLabel].
+     */
+    data class Confirm(
+        val plan: ImportPlan,
+        val wholeBot: Boolean = false,
+        val clashes: List<Clash> = emptyList(),
+        val folderLabel: String = "",
+    ) : ImportState
     /** A new bot's files are staged: waiting for its name (追加する). */
     data class ChooseName(val suggested: String, val error: String? = null) : ImportState
     data class Done(
@@ -623,7 +637,6 @@ object BotController {
                 if (into.isEmpty()) safe else "$into/$safe"
             }
             importPrefix = prefix
-            if (botId != null) importScope = prefix
             // A new bot from a ZIP unpacked on the phone: its one inner folder is the bot.
             stageFolderFrom(app, treeUri, staging, prefix, liftSingleTop = botId == null)
         }
@@ -635,6 +648,7 @@ object BotController {
     fun replaceBot(context: Context, uri: Uri, botId: String, zip: Boolean) =
         startImport(context, uri, Target.Existing(botId)) { app, staging ->
             importScope = ""
+            importWholeBot = true
             if (zip) stageFileFrom(app, uri, staging, "") else stageFolderFrom(app, uri, staging, "", liftSingleTop = true)
         }
 
@@ -676,6 +690,7 @@ object BotController {
     /** Where the files being imported go inside the bot, and which part of it the check compares (null: none). */
     @Volatile private var importPrefix: String = ""
     @Volatile private var importScope: String? = null
+    @Volatile private var importWholeBot: Boolean = false
 
     /** 「追加する」 on a folder found in PythonRunner: it becomes the new bot's shared folder as it is. */
     fun adoptFolder(context: Context, folderName: String) {
@@ -707,6 +722,7 @@ object BotController {
         target = t
         importPrefix = ""
         importScope = null
+        importWholeBot = false
         _importState.value = ImportState.Working(0)
         val app = context.applicationContext
         // The picker's grant ends with the activity; hold it so leaving the app does not stop the import.
@@ -733,11 +749,17 @@ object BotController {
                 importRequirements = BotImporter.requirements(staging, importPrefix)
                 when (t) {
                     is Target.Existing -> {
-                        val plan = BotImporter.plan(staging, store(app, t.id).codeDir, importScope)
-                        if (plan.overwrites.isEmpty() && plan.extras.isEmpty()) {
-                            applyImport(app, t.id, plan, emptyList())
-                        } else {
-                            _importState.value = ImportState.Confirm(plan)
+                        val codeDir = store(app, t.id).codeDir
+                        val plan = BotImporter.plan(staging, codeDir, importScope)
+                        when {
+                            plan.overwrites.isEmpty() && plan.extras.isEmpty() -> applyImport(app, t.id, plan, emptyList())
+                            importWholeBot -> _importState.value = ImportState.Confirm(plan, wholeBot = true)
+                            else -> _importState.value = ImportState.Confirm(
+                                plan,
+                                clashes = clashesOf(plan, staging, codeDir),
+                                folderLabel = importPrefix.substringBeforeLast('/', "").substringAfterLast('/')
+                                    .ifEmpty { name(app, t.id) ?: "" },
+                            )
                         }
                     }
                     else -> {
@@ -762,14 +784,34 @@ object BotController {
         }
     }
 
-    /** 取り込む in the check; [removeExtras] deletes the bot's files the new ones lack (「消す」). */
-    fun confirmImport(context: Context, removeExtras: Boolean) {
-        val plan = (_importState.value as? ImportState.Confirm)?.plan ?: return
+    /** For 「ファイルの置換またはスキップ」: each taken name, with the bot's file and the incoming one side by side. */
+    private fun clashesOf(plan: ImportPlan, staging: File, codeDir: File): List<Clash> = plan.overwrites.map { path ->
+        val incoming = File(staging, path)
+        val parent = File(codeDir, path.substringBeforeLast('/', ""))
+        val existing = parent.listFiles().orEmpty().firstOrNull { FileNames.sameName(it.name, incoming.name) } ?: File(codeDir, path)
+        Clash(path, existing.length(), existing.lastModified(), incoming.length(), incoming.lastModified())
+    }
+
+    /**
+     * 取り込む after the check: [resolution] answers the taken names (a whole-bot replace always replaces),
+     * [removeExtras] deletes the bot's files the new ones lack. Whatever is replaced or deleted goes to the bin.
+     */
+    fun confirmImport(context: Context, resolution: Resolution, removeExtras: Boolean) {
+        val state = _importState.value as? ImportState.Confirm ?: return
         val id = (target as? Target.Existing)?.id ?: return
         _importState.value = ImportState.Working(100)
         val app = context.applicationContext
-        scope.launch { runImport(app) { applyImport(app, id, plan, if (removeExtras) plan.extras else emptyList()) } }
+        scope.launch {
+            runImport(app) {
+                val s = store(app, id)
+                val plan = if (state.wholeBot) state.plan else BotImporter.resolve(state.plan, s.stagingDir, s.codeDir, resolution)
+                applyImport(app, id, plan, if (removeExtras) plan.extras else emptyList())
+            }
+        }
     }
+
+    /** The bot's recycle bin. */
+    fun trash(context: Context, id: String): Trash = Trash(store(context, id).trashDir)
 
     private fun applyImport(app: Context, id: String, plan: ImportPlan, remove: List<String>) {
         val s = store(app, id)
@@ -787,7 +829,8 @@ object BotController {
             }
         }
         s.codeDir.mkdirs()
-        BotImporter.applyPlan(plan, s.stagingDir, s.codeDir, s.backupDir, remove = remove)
+        val bin = trash(app, id)
+        BotImporter.applyPlan(plan, s.stagingDir, s.codeDir, s.backupDir, remove = remove, onReplaced = { f, p -> bin.put(f, p) })
         // The shared copy follows at once, so the automatic check does not offer its old files back.
         runCatching {
             val sync = sync(app, id)
