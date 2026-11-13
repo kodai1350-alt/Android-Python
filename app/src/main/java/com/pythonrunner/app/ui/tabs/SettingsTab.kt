@@ -49,7 +49,14 @@ import com.pythonrunner.app.ui.rememberUiPrefs
 
 /** The file to run first, secret values, the bot's name, and deleting it. */
 @Composable
-fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: Int, onMainChanged: (String) -> Unit) {
+fun SettingsTab(
+    botId: String,
+    name: String,
+    mainFile: String?,
+    filesVersion: Int,
+    onMainChanged: (String) -> Unit,
+    onOpenFile: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     val prefs = rememberUiPrefs()
     val store = remember(botId) { BotController.store(context, botId) }
@@ -79,7 +86,7 @@ fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: In
         if (pyFiles.isEmpty()) Text("まだ .py ファイルがありません（「ファイル」タブで取り込めます）", fontSize = 12.sp, color = Gray)
     }
 
-    EnvSection(botId, filesVersion)
+    EnvSection(botId, filesVersion, onOpenFile)
 
     Section("Botの名前") {
         var newName by remember(name) { mutableStateOf(name) }
@@ -110,60 +117,32 @@ fun SettingsTab(botId: String, name: String, mainFile: String?, filesVersion: In
 }
 
 /**
- * The bot's .env: the names it sets, values hidden; 「表示して編集」 opens the whole file for editing.
- * It is the same file as in the bot's folder (and the shared folder), so it can be edited on a PC too.
+ * The bot's .env: the names it sets, values hidden; 「表示して編集」 opens it in Notepad. It is the same file
+ * as in the bot's folder (and the shared folder), so it can be edited on a PC too.
  */
 @Composable
-private fun EnvSection(botId: String, filesVersion: Int) {
+private fun EnvSection(botId: String, filesVersion: Int, onOpenFile: (String) -> Unit) {
     val context = LocalContext.current
     val prefs = rememberUiPrefs()
     val scope = rememberCoroutineScope()
     val file = remember(botId) { File(BotController.store(context, botId).codeDir, DotEnv.FILE) }
-    var saved by remember(botId, filesVersion) { mutableStateOf(if (file.isFile) file.readText() else null) }
-    var editing by remember(botId) { mutableStateOf<String?>(null) }
-    var justSaved by remember(botId) { mutableStateOf(false) }
+    val saved = remember(botId, filesVersion) { if (file.isFile) runCatching { file.readText() }.getOrNull() else null }
 
     Section(".env（トークンなど）") {
-        val text = editing
-        when {
-            text != null -> {
-                OutlinedTextField(
-                    value = text, onValueChange = { editing = it; justSaved = false },
-                    label = { Text(".env") },
-                    placeholder = { Text("DISCORD_TOKEN=ここにトークン") },
-                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
-                    minLines = 8,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
-                        scope.launch {
-                            val ok = withContext(Dispatchers.IO) { runCatching { BotController.saveEnv(context, botId, text) }.isSuccess }
-                            if (ok) {
-                                saved = text
-                                editing = null
-                                justSaved = true
-                            } else {
-                                // The edit stays in the box, so nothing typed is lost.
-                                Toast.makeText(context, ".env を保存できませんでした", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                    }) { Text("保存") }
-                    OutlinedButton(onClick = { editing = null }) { Text("やめる") }
+        if (saved == null) {
+            Text("まだありません", color = Gray, fontSize = 13.sp)
+            OutlinedButton(onClick = {
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) { runCatching { BotController.saveEnv(context, botId, "") }.isSuccess }
+                    if (ok) onOpenFile(DotEnv.FILE) else Toast.makeText(context, ".env を作れませんでした", Toast.LENGTH_LONG).show()
                 }
-            }
-            saved == null -> {
-                Text("まだありません", color = Gray, fontSize = 13.sp)
-                OutlinedButton(onClick = { editing = ""; justSaved = false }) { Text("作る") }
-            }
-            else -> {
-                val names = DotEnv.names(saved.orEmpty())
-                if (names.isEmpty()) Text("値がまだ書かれていません", color = Gray, fontSize = 13.sp)
-                names.forEach { Text("$it ●●●●", fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
-                OutlinedButton(onClick = { editing = saved; justSaved = false }) { Text("表示して編集") }
-            }
+            }) { Text("作る") }
+        } else {
+            val names = DotEnv.names(saved)
+            if (names.isEmpty()) Text("値がまだ書かれていません", color = Gray, fontSize = 13.sp)
+            names.forEach { Text("$it ●●●●", fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
+            OutlinedButton(onClick = { onOpenFile(DotEnv.FILE) }) { Text("表示して編集") }
         }
-        if (justSaved) Text("✓ 保存しました（次の起動から使われます）", color = Green, fontSize = 12.sp)
         Help("env", prefs) {
             Text(
                 "Bot のフォルダの .env に書いた値は、Bot の中で os.environ[\"名前\"] で読めます。" +

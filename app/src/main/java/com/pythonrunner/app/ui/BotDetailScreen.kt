@@ -72,6 +72,8 @@ fun BotDetailScreen(
     var packages by rememberSaveable(botId) { mutableStateOf("pip install discord.py") }
     var importNote by remember(botId) { mutableStateOf<String?>(null) }
     var askRestart by remember(botId) { mutableStateOf(false) }
+    // A file open in Notepad (relative path), shown instead of the tabs.
+    var editing by rememberSaveable(botId) { mutableStateOf<String?>(null) }
     // Files changed by the files screen under a running bot: ask once whether to restart it.
     val changedWhileRunning by BotController.filesChangedWhileRunning.collectAsStateWithLifecycle()
     var askedRestartThisVisit by remember(botId) { mutableStateOf(false) }
@@ -101,6 +103,17 @@ fun BotDetailScreen(
     LaunchedEffect(sharedStates[botId], run.status) {
         mainFile = BotController.store(context, botId).mainFile
         filesVersion++
+    }
+
+    editing?.let { path ->
+        Column(Modifier.padding(horizontal = 12.dp)) {
+            NotepadScreen(
+                botId, path,
+                running = run.status == BotStatus.RUNNING || run.status == BotStatus.STARTING,
+                onClose = { editing = null; filesVersion++ },
+            )
+        }
+        return
     }
 
     Column(Modifier.padding(horizontal = 12.dp)) {
@@ -168,6 +181,7 @@ fun BotDetailScreen(
                     onMainChanged = { mainFile = it },
                     onFilesChanged = { mainFile = BotController.store(context, botId).mainFile; filesVersion++ },
                     onImportStarted = { importNote = null },
+                    onOpenFile = { editing = it },
                 )
                 2 -> LibraryTab(botId, packages, onPackagesChange = { packages = it })
                 3 -> SettingsTab(
@@ -176,6 +190,7 @@ fun BotDetailScreen(
                     mainFile = mainFile,
                     filesVersion = filesVersion,
                     onMainChanged = { mainFile = it },
+                    onOpenFile = { editing = it },
                 )
             }
         }

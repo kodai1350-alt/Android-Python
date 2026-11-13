@@ -157,6 +157,14 @@ object BotController {
 
     fun name(context: Context, id: String): String? = registry(context).get(id)?.name
 
+    /** Notepad's 保存: writes [path] as [like] was read, then copies it to the shared folder. */
+    fun saveText(context: Context, botId: String, path: String, text: String, like: com.pythonrunner.app.files.Opened.Text) {
+        val app = context.applicationContext
+        com.pythonrunner.app.files.TextFiles.save(File(store(app, botId).codeDir, path), text, like)
+        runCatching { sync(app, botId)?.exportForced(listOf(path)) }
+        recheck(botId)
+    }
+
     /** Saves the bot's .env (from the settings tab) and copies it to the shared folder. */
     fun saveEnv(context: Context, id: String, text: String) {
         val app = context.applicationContext
